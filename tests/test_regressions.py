@@ -86,6 +86,20 @@ check("бейглы (4563) — варианты", len(d("1 1/2 cups almond flour
 # --- порции
 t = ns["target_servings_for"]
 check("порции 12->8, 8->4, 6->6, 20->8", (t(12), t(8), t(6), t(20)), lambda x: x == (8, 4, 6, 8))
+
+def test_target_servings_threshold8():
+    _saved = (ns["RESCALE_TARGET_SERVINGS"], ns["RESCALE_ONLY_IF_MORE_THAN"], ns["RESCALE_MAX_DIVISOR"])
+    try:
+        ns["RESCALE_TARGET_SERVINGS"] = 4
+        ns["RESCALE_ONLY_IF_MORE_THAN"] = 8
+        ns["RESCALE_MAX_DIVISOR"] = 2.5
+        got = {n: t(n) for n in (6, 7, 8, 9, 10, 11, 16, 20, 24, 32)}
+        want = {6: 6, 7: 7, 8: 8, 9: 4, 10: 4, 11: 8, 16: 8, 20: 8, 24: 16, 32: 16}
+        check("test_target_servings_threshold8", got, lambda g: g == want)
+    finally:
+        ns["RESCALE_TARGET_SERVINGS"], ns["RESCALE_ONLY_IF_MORE_THAN"], ns["RESCALE_MAX_DIVISOR"] = _saved
+
+test_target_servings_threshold8()
 # --- источник без количеств / варианты
 check("источник без количеств", ns["no_quantity_ratio"]("olive oil\nground beef\nsalt\nonion\nbroth")[0], lambda r: r >= 0.7)
 check("варианты в одном списке (4563)", len(ns["multi_variant_dups"]("1 cup almond flour\n2 eggs\n2 cups mozzarella\n2 oz cream cheese\n1 tbsp baking powder\n1/2 cup coconut flour\n3 eggs\n2 cups mozzarella cheese\n2 oz cream cheese\n1 tbsp baking powder")), lambda n: n >= 3)

@@ -76,7 +76,7 @@ TRANSLATE_IDS_RAW = os.getenv("TRANSLATE_IDS", "").strip()
 RESCALE_TARGET_SERVINGS = int(os.getenv("RESCALE_TARGET_SERVINGS", "4"))
 # Если делитель больше этого значения (16 порций -> 4 = x4), цель удваивается (16 -> 8), чтобы не получать 1/4 яйца.
 RESCALE_MAX_DIVISOR = float(os.getenv("RESCALE_MAX_DIVISOR", "3"))
-RESCALE_ONLY_IF_MORE_THAN = int(os.getenv("RESCALE_ONLY_IF_MORE_THAN", "6"))
+RESCALE_ONLY_IF_MORE_THAN = int(os.getenv("RESCALE_ONLY_IF_MORE_THAN", "8"))
 # Строгие проверки рерайта: результат с этими дефектами НЕ сохраняется и НЕ кэшируется,
 # ID попадает в список повтора (REWRITE_IDS=...). Модель недетерминирована: повтор обычно проходит.
 STRICT_REWRITE_CHECKS = os.getenv("STRICT_REWRITE_CHECKS", "1") == "1"
@@ -92,9 +92,9 @@ TARGET_MARKET = os.getenv("TARGET_MARKET", "fr")
 TARGET_CURRENCY = os.getenv("TARGET_CURRENCY", "EUR")
 
 if APP_MODE == "translate":
-    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE_TRANSLATE", "desserts_translate_prompt_fr_v4.txt")
+    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE_TRANSLATE", "prompts/desserts_translate_prompt_fr_v4.txt")
 else:
-    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "desserts_rewrite_prompt_v3_4.txt")
+    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "prompts/desserts_rewrite_prompt_v3_5.txt")
 
 CSV_LOG_FILE = BASE_DIR / os.getenv("CSV_LOG_FILE", "rewrite_update_log.csv")
 CACHE_DIR = BASE_DIR / "gemini_cache"
