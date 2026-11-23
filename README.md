@@ -17,9 +17,18 @@
 ## Запуск
 ```powershell
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
-pip install google-genai python-dotenv mysql-connector-python pydantic   # уточнить по импортам скрипта
+pip install mariadb python-dotenv google-genai pydantic
 copy .env.example .env     # заполнить ключи
 python tests\test_regressions.py                                        # должно быть: все тесты пройдены
 python rewr-transl.py
 ```
 Секреты (`.env`), логи, кэш и CSV в git не попадают.
+
+## Зависимости
+Сторонние пакеты по `import` из `rewr-transl.py` (без версий):
+- `mariadb` (`import mariadb`)
+- `python-dotenv` (`from dotenv import load_dotenv`)
+- `google-genai` (`from google import genai`, `from google.genai import types`)
+- `pydantic` (`from pydantic import BaseModel, Field`)
+
+`checks.py` использует только стандартную библиотеку Python (`re`, `collections`, `fractions`).
