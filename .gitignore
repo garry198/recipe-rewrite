@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+gemini_cache/
+logs/*
+!logs/.gitkeep
+api_usage.csv
+*.csv
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+reviews/*
+!reviews/.gitkeep
