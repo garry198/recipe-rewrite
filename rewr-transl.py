@@ -90,6 +90,7 @@ ADAPT_MARKET = os.getenv("ADAPT_MARKET", "US")
 ADAPT_LOCALE = os.getenv("ADAPT_LOCALE", "en_US")
 ADAPT_STATUS = os.getenv("ADAPT_STATUS", "active").lower()
 ADAPT_FORCE = os.getenv("ADAPT_FORCE", "0").lower() in {"1", "true", "yes", "on"}
+FORCE_KEEP_DISH_NAME = os.getenv("FORCE_KEEP_DISH_NAME", "1").lower() in {"1", "true", "yes", "on"}
 VALID_ADAPT_STATUSES = ("draft", "active", "archived")
 
 RESCALE_TARGET_SERVINGS = int(os.getenv("RESCALE_TARGET_SERVINGS", "4"))
@@ -97,6 +98,7 @@ RESCALE_TARGET_SERVINGS = int(os.getenv("RESCALE_TARGET_SERVINGS", "4"))
 RESCALE_MAX_DIVISOR = float(os.getenv("RESCALE_MAX_DIVISOR", "3"))
 RESCALE_ONLY_IF_MORE_THAN = int(os.getenv("RESCALE_ONLY_IF_MORE_THAN", "8"))
 RESCALE_SMART = os.getenv("RESCALE_SMART", "1").lower() in {"1", "true", "yes", "on"}
+RESCALE_SKIP_PAREN_QTY = os.getenv("RESCALE_SKIP_PAREN_QTY", "1").lower() in {"1", "true", "yes", "on"}
 RESCALE_CANDIDATES = [
     int(x.strip()) for x in os.getenv("RESCALE_CANDIDATES", "4,6,8,12,16,24,32").split(",") if x.strip()
 ]
@@ -131,7 +133,7 @@ CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
 UNITS_VERSION = "u2"
-SCALE_VERSION = "s21"
+SCALE_VERSION = "s22"
 
 EXPECTED_CSV_HEADER = [
     "Rewrite Row ID", "Recipe ID", "Previous Dish Name", "Rewritten Dish Name",
@@ -1409,7 +1411,13 @@ def write_force_report(
         book_tag = " — **ИСПОЛЬЗОВАН В КНИГЕ**" if (used_val or 0) > 0 else ""
         md_lines.append(f"### recipes3.id={e['recipe_id']} (recipe_rewrite.id={e.get('rewrite_id') or '-'}){book_tag}")
         md_lines.append(f"- `used_before`: {used_val if used_val is not None else ''}")
-        md_lines.append(f"- `dish_name`: `{e.get('dish_name_before', '')}` -> `{e.get('dish_name_after', '')}`")
+        if e.get("dish_name_kept"):
+            md_lines.append(f"- `dish_name`: `{e.get('dish_name_before', '')}` -> `сохранено`")
+            model_name = (e.get("model_dish_name") or "").strip()
+            if model_name and model_name != (e.get("dish_name_before") or "").strip():
+                md_lines.append(f"  - модель предложила: `{model_name}`")
+        else:
+            md_lines.append(f"- `dish_name`: `{e.get('dish_name_before', '')}` -> `{e.get('dish_name_after', '')}`")
         md_lines.append(f"- `serves`: `{e.get('serves_before')}` -> `{e.get('serves_after')}`")
         diff_lines = list(
             difflib.unified_diff(
@@ -1496,7 +1504,7 @@ def summarize_adapt_unprocessed(
     return reasons
 
 
-def build_adapt_insert_sql(force: bool = False) -> str:
+def build_adapt_insert_sql(force: bool = False, keep_dish_name: bool = False) -> str:
     base = """
         INSERT INTO recipe_rewrite (
             recipe_id, market, locale, variant_type, status,
@@ -1507,13 +1515,13 @@ def build_adapt_insert_sql(force: bool = False) -> str:
     """
     if not force:
         return base.strip()
+    dish_name_update = "" if keep_dish_name else "\n            dish_name_variant = VALUES(dish_name_variant),"
     return (
         base.strip()
-        + """
+        + f"""
         ON DUPLICATE KEY UPDATE
             id = LAST_INSERT_ID(id),
-            status = VALUES(status),
-            dish_name_variant = VALUES(dish_name_variant),
+            status = VALUES(status),{dish_name_update}
             ingredients_list_variant = VALUES(ingredients_list_variant),
             cooking_instructions_variant = VALUES(cooking_instructions_variant),
             instructions_hash = VALUES(instructions_hash),
@@ -1545,9 +1553,10 @@ def save_adapted_recipe(
     locale: str,
     status: str,
     force: bool = False,
+    keep_dish_name: bool = False,
 ) -> tuple[int | None, str]:
     instructions_hash = hashlib.sha256(data.cooking_instructions.encode("utf-8")).hexdigest()
-    sql = build_adapt_insert_sql(force=force)
+    sql = build_adapt_insert_sql(force=force, keep_dish_name=keep_dish_name)
     params = (
         int(source_row["recipe_id"]),
         market,
@@ -1686,12 +1695,48 @@ def _egg_penalty(src_srv: int, cand_srv: int, amounts: Sequence[float]) -> int:
     return sum(1 for amt in amounts if abs(amt * factor - round(amt * factor)) > 1e-6)
 
 
-def choose_target_servings(src_srv: int, ingredients: str) -> int:
-    """Выбор целевого числа порций: избегает дробных счётных яиц, если есть допустимый кандидат лучше base."""
-    if not RESCALE_SMART:
-        return target_servings_for(src_srv)
+_OPTIONAL_INGR_RE = re.compile(
+    r"\b(?:optional|to\s+taste|for\s+(?:serving|garnish(?:ing)?|coating|dusting|topping))\b",
+    re.IGNORECASE,
+)
+_LEADING_NUM_RE = re.compile(r"^\s*(?:[-*•▢☐□■·]\s*)?(?:\d|[½¼¾⅓⅔⅛])")
+_PAREN_QTY_RE = re.compile(
+    r"\([^)\n]*\b(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛])\s*"
+    r"(?:g|grams?|kg|kilograms?|oz|ounces?|lbs?|pounds?|ml|milliliters?|l|liters?|litres?|"
+    r"cups?|tsps?|tbsps?|teaspoons?|tablespoons?|pieces?|pcs?|slices?|cloves?|cans?|jars?|packages?|pkgs?)\b[^)\n]*\)",
+    re.IGNORECASE,
+)
+
+
+def find_paren_only_qty_line(ingredients: str) -> str | None:
+    """Возвращает первую обязательную строку без ведущего числа, но с количеством в скобках."""
+    for raw_line in (ingredients or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.endswith(":"):
+            continue
+        if _OPTIONAL_INGR_RE.search(line):
+            continue
+        if _LEADING_NUM_RE.match(line):
+            continue
+        if _PAREN_QTY_RE.search(line):
+            return line
+    return None
+
+
+def choose_target_servings(src_srv: int, ingredients: str, row_id: int | None = None) -> int:
+    """Выбор целевого числа порций: избегает дробных счётных яиц и отключает масштабирование при количестве только в скобках."""
     if RESCALE_TARGET_SERVINGS <= 0 or src_srv <= RESCALE_ONLY_IF_MORE_THAN:
         return src_srv
+    if globals().get("RESCALE_SKIP_PAREN_QTY", True):
+        paren_line = find_paren_only_qty_line(ingredients)
+        if paren_line:
+            lg = globals().get("LOGGER")
+            if lg is not None:
+                prefix = f"ID {row_id}: " if row_id is not None else ""
+                lg.warning(f"{prefix}количество только в скобках, масштабирование отключено: {paren_line}")
+            return src_srv
+    if not RESCALE_SMART:
+        return target_servings_for(src_srv)
     base = target_servings_for(src_srv)
     amounts = _countable_egg_amounts(ingredients)
     if not amounts:
@@ -2371,7 +2416,7 @@ def main() -> int:
                                 "servings": src_srv,
                             }
                         elif is_rewrite_pipeline:
-                            new_srv = choose_target_servings(src_srv, pr["ingredients_list"])
+                            new_srv = choose_target_servings(src_srv, pr["ingredients_list"], row_id=row_key)
                             if new_srv != src_srv:
                                 factor = new_srv / src_srv
                                 if abs(factor - 1.0) > 1e-5:
@@ -2539,7 +2584,8 @@ def main() -> int:
                         if APP_MODE == "adapt":
                             saved_id, save_status = save_adapted_recipe(
                                 connection, rows_by_id[rid], rewritten, GEMINI_MODEL,
-                                ADAPT_MARKET, ADAPT_LOCALE, ADAPT_STATUS, force=ADAPT_FORCE,
+                                ADAPT_MARKET, ADAPT_LOCALE, ADAPT_STATUS,
+                                force=ADAPT_FORCE, keep_dish_name=FORCE_KEEP_DISH_NAME,
                             )
                             if save_status == "OK" and saved_id:
                                 batch_saved_ids.append(int(saved_id))
@@ -2570,12 +2616,15 @@ def main() -> int:
                     if APP_MODE == "adapt" and ADAPT_FORCE and save_status in ("OK", "DRY_RUN"):
                         r_id = int(rows_by_id[rid]["recipe_id"])
                         prev = before_by_recipe.get(r_id, {})
+                        keep_name = bool(FORCE_KEEP_DISH_NAME and prev)
                         force_report_entries.append({
                             "recipe_id": r_id,
                             "rewrite_id": saved_id if saved_id is not None else prev.get("id"),
                             "used_before": used_before_map.get(r_id),
                             "dish_name_before": prev.get("dish_name_variant") or rows_by_id[rid].get("dish_name") or "",
-                            "dish_name_after": rows_by_id[rid].get("dish_name") or "",
+                            "dish_name_after": "сохранено" if keep_name else (rows_by_id[rid].get("dish_name") or ""),
+                            "dish_name_kept": keep_name,
+                            "model_dish_name": rewritten.dish_name,
                             "serves_before": prev.get("serves") if prev else rows_by_id[rid].get("serves"),
                             "serves_after": rewritten.servings,
                             "ingredients_before": prev.get("ingredients_list_variant") or rows_by_id[rid].get("ingredients_list") or "",
