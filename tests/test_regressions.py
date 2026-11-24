@@ -7,14 +7,25 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # корен
 SCRIPT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "rewr-transl.py")
 src = open(SCRIPT, encoding="utf-8").read()
 import math
+import hashlib
 from collections import Counter
-ns = {"re": re, "Fraction": Fraction, "os": os, "Counter": Counter, "math": math}
+from pathlib import Path
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+ns = {
+    "re": re, "Fraction": Fraction, "os": os, "Counter": Counter, "math": math,
+    "hashlib": hashlib, "Path": Path, "BASE_DIR": Path(HERE), "yaml": yaml,
+    "BaseModel": BaseModel, "ConfigDict": ConfigDict, "Field": Field, "ValidationError": ValidationError,
+    "APP_MODE": "translate", "TARGET_LOCALE": "fr_FR", "THINKING_LEVEL": "low",
+    "UNITS_VERSION": "u2", "SCALE_VERSION": "s20", "CHECKS_VERSION": "c9",
+}
 exec(src[src.index("_METRIC_LEAD_RE"): src.index("# ================= UNITS_FR")], ns)           # math + merge
 exec(src[src.index("_BRAND_RE ="): src.index("def build_sent_ingredients")], ns)                   # multi-variant, no-qty
 exec("RESCALE_TARGET_SERVINGS=4\nRESCALE_ONLY_IF_MORE_THAN=8\nRESCALE_MAX_DIVISOR=2.5\n"
      + src[src.index("def target_servings_for"): src.index("def build_sent_ingredients")], ns)
 exec(src[src.index('AUTO_FIX_PREP ='): src.index("def validate_and_fix_rewrite")], ns)                       # авто-подготовка
 exec(src[src.index("# ================= UNITS_FR"): src.index("# ================= СХЕМЫ ДАННЫХ")], ns)      # units (перевод)
+exec(src[src.index("def generate_run_hash"): src.index("def row_fingerprint")], ns)                         # run_hash
 sys.path.insert(0, HERE)
 import checks as C
 
@@ -115,6 +126,7 @@ check("fidelity понимает tsps/¼", C.fidelity_check("1 1/2 tsps cumin\n�
 check("безопасная температура курицы", C.fix_safety_temps("1 lb ground chicken", "Cook until the internal temperature reaches 160°F.")[0], "165°F")
 check("ссылка на рецепт в списке", C.strip_recipe_refs("1/2 recipe fresh salsa"), "prepared fresh salsa, for serving")
 check("style_check poultry", C.style_check("1 lb chicken", "Cook the poultry.", ""), lambda x: len(x) == 1)
+check("run_hash unchanged (r04.3)", ns["generate_run_hash"]("TEST_PROMPT", "gemini-3.8-flash", "4/8/2.5"), lambda h: h == "c31fc268")
 
 print("\nИТОГО:", "все тесты пройдены" if not fails else f"упало {len(fails)}: {fails}")
 sys.exit(1 if fails else 0)

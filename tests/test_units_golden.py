@@ -6,6 +6,8 @@ import math
 import re
 import sys
 from pathlib import Path
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 HERE = Path(__file__).resolve().parent.parent
 SCRIPT = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "rewr-transl.py"
@@ -13,7 +15,10 @@ CORPUS_FILE = HERE / "tests" / "golden" / "units_corpus.txt"
 EXPECTED_FILE = HERE / "tests" / "golden" / "units_fr_expected.txt"
 
 src = SCRIPT.read_text(encoding="utf-8")
-ns = {"re": re, "math": math, "Path": Path, "BASE_DIR": HERE, "TARGET_LOCALE": "fr_FR"}
+ns = {
+    "re": re, "math": math, "Path": Path, "BASE_DIR": HERE, "TARGET_LOCALE": "fr_FR",
+    "yaml": yaml, "BaseModel": BaseModel, "ConfigDict": ConfigDict, "Field": Field, "ValidationError": ValidationError,
+}
 if "# ================= СХЕМЫ ДАННЫХ" in src and "# ================= UNITS_FR" in src:
     exec(src[src.index("# ================= UNITS_FR"): src.index("# ================= СХЕМЫ ДАННЫХ")], ns)
 else:
