@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 gemini_cache/
+backups/
 logs/*
 !logs/.gitkeep
 api_usage.csv
