@@ -24,7 +24,7 @@
 4. Инструкции: обычный текст, абзац на шаг, пустая строка между шагами, без нумерации (Book Pipeline сам нумерует
    — ПРОВЕРИТЬ; его промпт пересчёта порций v4.1 ожидает нумерованные шаги, возможный конфликт форматов).
 5. Нет КБЖУ в тексте (считает cost-nutrients).
-6. В режиме `adapt` (`recipes3` → `recipe_rewrite`): `INSERT INTO recipe_rewrite` с ключом `(recipe_id, market, locale, variant_type)` (`variant_type='rewrite'`, `market='US'`, `locale='en_US'`, `status=ADAPT_STATUS` ∈ `{draft, active, archived}`, `currency='USD'`, `needs_reprice=1`, `dish_cost_serves=serves`); поля КБЖУ, `dish_cost_local`, `nutrients_recalc_version` остаются `NULL` (при `ADAPT_FORCE=1` обнуляются, т.к. после смены порций устарели).
+6. В режиме `adapt` (`recipes3` → `recipe_rewrite`): `INSERT INTO recipe_rewrite` с ключом `(recipe_id, market, locale, variant_type)` (`variant_type='rewrite'`, `market='US'`, `locale='en_US'`, `status=ADAPT_STATUS` ∈ `{draft, active, archived}`, `currency='USD'`, `needs_reprice=1`, `dish_cost_serves=serves`); поля КБЖУ, `dish_cost_local`, `nutrients_recalc_version` остаются `NULL` (при `ADAPT_FORCE=1` обнуляются, т.к. после смены порций устарели; `ADAPT_FORCE=1` требует явный `ADAPT_IDS`, а `ADAPT_EXCLUDE_IDS` исключает проблемные/существующие `recipes3.id` из выборки).
 7. В режиме `rewrite` (`UPDATE`) и `translate` (`INSERT`/`ON DUPLICATE KEY UPDATE`) также выставляются `needs_reprice=1` и `dish_cost_serves=serves` (в `translate` `dish_cost_local` не копируется).
 8. После успешного `commit` батча при `DRY_RUN=false` id вставленных/обновлённых строк `recipe_rewrite.id` пишутся в `logs\rewrite_ids_<mode>_<YYYYmmdd_HHMMSS>.txt` (настройка `IDS_OUT_DIR`, UTF-8, LF).
 9. Контракт `cost-nutrients` и цикл запуска:
