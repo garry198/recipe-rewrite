@@ -24,7 +24,8 @@
 - r09 — переделка рерайтов с потерянными количествами: backup, `rollback_force.py`, отчёт `force_report` (**слита** в `main`)
 - r10 — учёт аккаунта и контекста запуска в `api_usage.csv` (`GEMINI_ACCOUNT_LABEL`, дефолт `"main"` — согласовано с `cost-nutrients (q41.8)` и `Book Pipeline`, `key_fp`, `api_usage_report.py`; **слита** в `main`)
 - r11 — надёжность процесса: тесты перед слиянием (`tools/test_suites.ps1`), повтор API + split, лимит `MAX_RUN_COST_USD` (**слита** в `main`)
-- r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`)
+- r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`) (**слита** в `main`)
+- r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (в `worker/r11c`)
 - r12 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
 - r13 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
