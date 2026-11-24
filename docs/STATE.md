@@ -20,9 +20,10 @@
 - r05 — DE: промпт, меры (г/мл, EL/TL, Prise), духовка (Ober-/Unterhitze, Umluft), тесты (**слита** в `main`)
 - r06 — режим `adapt`: `recipes3` → рерайт → `INSERT` в `recipe_rewrite` + контракт `cost-nutrients` (**слита** в `main`); `CHECKS c10`
 - r07 — выбор целевого числа порций без дробных яиц (`choose_target_servings`, `SCALE_VERSION s21` — сброс кэша) (**слита** в `main`)
-- r08 — пропуск рецептов со ссылкой на другой рецепт (`SKIP_RECIPE_REFS=1`, `has_recipe_ref`)
-- r09 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
-- r10 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+- r08 — пропуск рецептов со ссылкой на другой рецепт (`SKIP_RECIPE_REFS=1`, `has_recipe_ref`) (**слита** в `main`)
+- r09 — переделка рерайтов с потерянными количествами: backup, `rollback_force.py`, отчёт `force_report` (в `worker/r09`)
+- r10 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
+- r11 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
 Процесс: воркер в `worker/rNN` (локальные коммиты) → `make_review_pack.ps1` → приёмка Claude → слияние владельцем через `.\tools\merge_branch.ps1 worker/rNN` (без GitHub PR).
 

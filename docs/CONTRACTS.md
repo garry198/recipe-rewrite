@@ -32,6 +32,12 @@
    - `needs_reprice` `cost-nutrients` только сбрасывает (`= 0` при записи результата); при выгрузке для книги (`Book Pipeline`) строки с `needs_reprice <> 0` пропускаются.
    - Для изменённых (а не новых) строк нужен явный `--ids-file`.
    - Рабочий цикл: `dry-run`, затем волна записи с `--ids-file` по `procedures/db_write.md`.
+10. Перезапись при `ADAPT_FORCE=1` (порядок для владельца):
+    1. Убедиться, что исправление источника в `recipes3` (i10/i11) выполнено.
+    2. В `.env` задать `APP_MODE=adapt`, `ADAPT_FORCE=1`, `ADAPT_IDS=<список recipes3.id>`, `DRY_RUN=1` → запустить и проверить отчёт `logs/force_report_<ts>.md` (и `.csv`).
+    3. Выставить `DRY_RUN=0` → скрипт создаст резервную копию в `backups/recipe_rewrite_force_<ts>.jsonl` (+ `.meta.json`) до первого запроса к API и обновит строки.
+    4. Запустить `cost-nutrients` по сгенерированному `logs/rewrite_ids_adapt_<ts>.txt`.
+    5. При проблемах откатить: `python tools/rollback_force.py backups/recipe_rewrite_force_<ts>.jsonl` (сначала без `--apply`, затем с `--apply` и при необходимости `--delete-inserted`).
 
 ## Чего rewrite не делает
 Не считает цены и КБЖУ, не пересчитывает порции для книги (это Book Pipeline), не парсит сайты (recipe-ingest).
