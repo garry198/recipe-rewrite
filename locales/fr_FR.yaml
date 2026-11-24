@@ -95,6 +95,7 @@ cup_grams:
 oven:
   tolerance_f: 12
   template: "{c}°C (Th. {th})"
+  fallback_template: "{c}°C"
   entries:
     225: { c: 110, th: "3-4" }
     250: { c: 120, th: "4" }
