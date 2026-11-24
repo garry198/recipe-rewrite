@@ -25,6 +25,8 @@ class FakeMariaDB:
     IntegrityError = FakeIntegrityError
 
 
+_test_logger = logging.getLogger("test_adapt")
+_test_logger.addHandler(logging.StreamHandler(sys.stdout))
 ns: dict[str, Any] = {
     "re": re,
     "csv": csv,
@@ -36,7 +38,7 @@ ns: dict[str, Any] = {
     "BaseModel": BaseModel,
     "Field": Field,
     "mariadb": FakeMariaDB,
-    "LOGGER": logging.getLogger("test_adapt"),
+    "LOGGER": _test_logger,
     "VALID_ADAPT_STATUSES": ("draft", "active", "archived"),
 }
 ns["EXPECTED_CSV_HEADER"] = [
