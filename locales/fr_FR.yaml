@@ -1,0 +1,122 @@
+meta:
+  locale: fr_FR
+  lang: fr
+  market: fr
+  currency: EUR
+  usd_rate: 0.92
+  prompt_file: prompts/desserts_translate_prompt_fr_v4.txt
+
+number_format:
+  decimal_sep: ","
+  range_sep: "–"
+
+spoons:
+  tsp: "c. à c."
+  tbsp: "c. à s."
+
+units:
+  weight:
+    g_step: 5
+    g_step_min: 25
+    kg_from_g: 1000
+    kg_step: 0.05
+    g_suffix: "g"
+    kg_suffix: "kg"
+  volume:
+    ml_step: 5
+    ml_step_below: 100
+    use_cl: true
+    cl_below_ml: 1000
+    l_from_ml: 1000
+    ml_suffix: "ml"
+    cl_suffix: "cl"
+    l_suffix: "l"
+  length:
+    mm_below_cm: 1
+    half_cm_below: 5
+    mm_suffix: "mm"
+    cm_suffix: "cm"
+
+# Порядок записей значим: используется первое совпадение подстроки в хвосте ингредиента.
+cup_grams:
+  - ["cilantro", 16]
+  - ["parsley", 15]
+  - ["basil", 20]
+  - ["spinach", 30]
+  - ["cabbage", 70]
+  - ["cauliflower", 100]
+  - ["broccoli", 90]
+  - ["zucchini", 120]
+  - ["celery", 100]
+  - ["bell pepper", 150]
+  - ["mushrooms", 70]
+  - ["onion", 150]
+  - ["almond flour", 96]
+  - ["coconut flour", 112]
+  - ["powdered", 120]
+  - ["erythritol", 200]
+  - ["sweetener", 200]
+  - ["allulose", 150]
+  - ["cocoa", 85]
+  - ["shredded coconut", 80]
+  - ["coconut flakes", 80]
+  - ["unsweetened coconut", 80]
+  - ["cream cheese", 230]
+  - ["cottage cheese", 225]
+  - ["ricotta", 250]
+  - ["mascarpone", 250]
+  - ["parmesan", 100]
+  - ["cheddar", 110]
+  - ["mozzarella", 110]
+  - ["shredded", 110]
+  - ["grated", 100]
+  - ["peanut butter", 250]
+  - ["almond butter", 250]
+  - ["tahini", 240]
+  - ["butter", 225]
+  - ["chocolate chips", 170]
+  - ["pecans", 110]
+  - ["walnuts", 115]
+  - ["almonds", 130]
+  - ["hazelnuts", 135]
+  - ["macadamia", 135]
+  - ["cashews", 130]
+  - ["pistachios", 125]
+  - ["sesame seeds", 145]
+  - ["chia seeds", 170]
+  - ["flaxseed", 150]
+  - ["sunflower seeds", 140]
+  - ["pumpkin seeds", 130]
+  - ["blueberries", 150]
+  - ["raspberries", 125]
+  - ["strawberries", 165]
+  - ["cheese", 110]
+
+oven:
+  tolerance_f: 12
+  template: "{c}°C (Th. {th})"
+  entries:
+    225: { c: 110, th: "3-4" }
+    250: { c: 120, th: "4" }
+    275: { c: 135, th: "4-5" }
+    300: { c: 150, th: "5" }
+    325: { c: 160, th: "5-6" }
+    350: { c: 180, th: "6" }
+    375: { c: 190, th: "6-7" }
+    400: { c: 200, th: "6-7" }
+    425: { c: 220, th: "7-8" }
+    450: { c: 230, th: "8" }
+    475: { c: 240, th: "8-9" }
+    500: { c: 250, th: "9-10" }
+
+containers:
+  - "ramekins?"
+  - "glass(?:es)?"
+  - "mugs?"
+  - "jars?"
+  - "cups?"
+
+nutrition_headers:
+  - "Valeurs nutritionnelles"
+  - "Nutritional values"
+  - "Calories\\s*:"

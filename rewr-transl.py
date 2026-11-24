@@ -22,10 +22,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import mariadb
+import yaml
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 try:
     from checks import (
@@ -530,6 +531,108 @@ def scale_recipe(ingredients: str, instructions: str, factor: float) -> tuple[st
 
 
 # ================= UNITS_FR =================
+class LocaleMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    locale: str
+    lang: str
+    market: str
+    currency: str
+    usd_rate: float = Field(gt=0)
+    prompt_file: str
+
+
+class LocaleNumberFormat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decimal_sep: str
+    range_sep: str
+
+
+class LocaleSpoons(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tsp: str
+    tbsp: str
+
+
+class LocaleWeightUnits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    g_step: int = Field(gt=0)
+    g_step_min: int = Field(ge=0)
+    kg_from_g: int = Field(gt=0)
+    kg_step: float = Field(gt=0)
+    g_suffix: str
+    kg_suffix: str
+
+
+class LocaleVolumeUnits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ml_step: int = Field(gt=0)
+    ml_step_below: int = Field(gt=0)
+    use_cl: bool
+    cl_below_ml: int = Field(gt=0)
+    l_from_ml: int = Field(gt=0)
+    ml_suffix: str
+    cl_suffix: str
+    l_suffix: str
+
+
+class LocaleLengthUnits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mm_below_cm: float = Field(gt=0)
+    half_cm_below: float = Field(gt=0)
+    mm_suffix: str
+    cm_suffix: str
+
+
+class LocaleUnits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    weight: LocaleWeightUnits
+    volume: LocaleVolumeUnits
+    length: LocaleLengthUnits
+
+
+class OvenEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    c: int
+    th: str | None = None
+
+
+class LocaleOven(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tolerance_f: int = Field(ge=0)
+    template: str
+    entries: dict[int, OvenEntry]
+
+
+class LocaleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    meta: LocaleMeta
+    number_format: LocaleNumberFormat
+    spoons: LocaleSpoons
+    units: LocaleUnits
+    cup_grams: list[tuple[str, int]]
+    oven: LocaleOven
+    containers: list[str]
+    nutrition_headers: list[str]
+
+
+def load_locale(locale_name: str, base_dir: Path | None = None) -> LocaleConfig:
+    root = base_dir if base_dir is not None else Path(__file__).resolve().parent
+    path = root / "locales" / f"{locale_name}.yaml"
+    if not path.is_file():
+        raise FileNotFoundError(f"Файл локали не найден: {path}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Некорректный формат YAML в {path}: ожидается словарь верхнего уровня.")
+    try:
+        return LocaleConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(f"Ошибка валидации локали {path}: {exc}") from exc
+
+
+_LOCALE_BASE = BASE_DIR if "BASE_DIR" in globals() else Path(__file__).resolve().parent
+_LOCALE_NAME = TARGET_LOCALE if "TARGET_LOCALE" in globals() else "fr_FR"
+LOCALE = load_locale(_LOCALE_NAME, _LOCALE_BASE)
+
 _UNI_FRAC = {"½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", "⅛": "1/8"}
 _NUM = r"\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?"
 
@@ -545,29 +648,16 @@ TEMP_RE = re.compile(
     r"(?:\s*\(\s*\d{2,3}(?:\s*[-–]\s*\d{2,3})?\s*(?:°|º|degrees?)?\s*C\s*\))?"
 )
 PLACEHOLDER_RE = re.compile(r"\[\[[TQ]\d+\]\]")
+_CONTAINERS_RE = re.compile(
+    rf"\s*(?:oven[- ]safe\s+)?(?:{'|'.join(LOCALE.containers)})\b"
+)
+_NUTRITION_RE = re.compile(
+    rf"({'|'.join(LOCALE.nutrition_headers)}).*$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
-OVEN_MAP = {
-    225: (110, "3-4"), 250: (120, "4"), 275: (135, "4-5"), 300: (150, "5"),
-    325: (160, "5-6"), 350: (180, "6"), 375: (190, "6-7"), 400: (200, "6-7"),
-    425: (220, "7-8"), 450: (230, "8"), 475: (240, "8-9"), 500: (250, "9-10"),
-}
-
-CUP_GRAMS = [
-    ("cilantro", 16), ("parsley", 15), ("basil", 20), ("spinach", 30), ("cabbage", 70),
-    ("cauliflower", 100), ("broccoli", 90), ("zucchini", 120), ("celery", 100),
-    ("bell pepper", 150), ("mushrooms", 70), ("onion", 150),
-    ("almond flour", 96), ("coconut flour", 112), ("powdered", 120),
-    ("erythritol", 200), ("sweetener", 200), ("allulose", 150), ("cocoa", 85),
-    ("shredded coconut", 80), ("coconut flakes", 80), ("unsweetened coconut", 80),
-    ("cream cheese", 230), ("cottage cheese", 225), ("ricotta", 250), ("mascarpone", 250),
-    ("parmesan", 100), ("cheddar", 110), ("mozzarella", 110), ("shredded", 110), ("grated", 100),
-    ("peanut butter", 250), ("almond butter", 250), ("tahini", 240), ("butter", 225),
-    ("chocolate chips", 170), ("pecans", 110), ("walnuts", 115), ("almonds", 130),
-    ("hazelnuts", 135), ("macadamia", 135), ("cashews", 130), ("pistachios", 125),
-    ("sesame seeds", 145), ("chia seeds", 170), ("flaxseed", 150), ("sunflower seeds", 140),
-    ("pumpkin seeds", 130), ("blueberries", 150), ("raspberries", 125), ("strawberries", 165),
-    ("cheese", 110),
-]
+OVEN_MAP = LOCALE.oven.entries
+CUP_GRAMS = LOCALE.cup_grams
 
 
 def _to_float(s: str) -> float:
@@ -582,48 +672,58 @@ def _to_float(s: str) -> float:
 
 
 def _fr(s: str) -> str:
-    return s.replace(".", ",")
+    return s.replace(".", LOCALE.number_format.decimal_sep)
 
 
 def _fmt_g(g: float) -> str:
-    if g >= 1000:
-        kg = round(g / 50) * 0.05
-        return _fr(f"{kg:.2f}".rstrip("0").rstrip(".")) + " kg"
-    g = round(g / 5) * 5 if g >= 25 else round(g)
-    return f"{int(g)} g"
+    w = LOCALE.units.weight
+    if g >= w.kg_from_g:
+        kg = round(g / (w.kg_step * 1000)) * w.kg_step
+        return _fr(f"{kg:.2f}".rstrip("0").rstrip(".")) + f" {w.kg_suffix}"
+    g = round(g / w.g_step) * w.g_step if g >= w.g_step_min else round(g)
+    return f"{int(g)} {w.g_suffix}"
 
 
 def _fmt_vol(ml: float) -> str:
-    if ml < 100:
-        return f"{int(round(ml / 5) * 5)} ml"
-    cl = round(ml / 10)
-    return f"{cl} cl" if cl < 100 else _fr(f"{round(ml / 1000, 2):g} l")
+    v = LOCALE.units.volume
+    if ml < v.ml_step_below:
+        return f"{int(round(ml / v.ml_step) * v.ml_step)} {v.ml_suffix}"
+    if v.use_cl and ml < v.cl_below_ml:
+        cl = round(ml / 10)
+        if cl < 100:
+            return f"{cl} {v.cl_suffix}"
+    if not v.use_cl and ml < v.l_from_ml:
+        return f"{int(round(ml / v.ml_step) * v.ml_step)} {v.ml_suffix}"
+    return _fr(f"{round(ml / 1000, 2):g} {v.l_suffix}")
 
 
 def _fmt_cm(cm: float) -> str:
-    if cm < 1:
-        return f"{int(round(cm * 10))} mm"
-    v = math.floor(cm * 2 + 0.4) / 2 if cm < 5 else round(cm)
-    return _fr(f"{v:g}") + " cm"
+    ln = LOCALE.units.length
+    if cm < ln.mm_below_cm:
+        return f"{int(round(cm * 10))} {ln.mm_suffix}"
+    v = math.floor(cm * 2 + 0.4) / 2 if cm < ln.half_cm_below else round(cm)
+    return _fr(f"{v:g}") + f" {ln.cm_suffix}"
 
 
 def _rj(vals: list[str]) -> str:
+    sep = LOCALE.number_format.range_sep
     if len(vals) == 2:
         a, b = vals[0].rsplit(" ", 1), vals[1].rsplit(" ", 1)
         if len(a) == 2 and len(b) == 2 and a[1] == b[1]:
-            return f"{a[0]}–{vals[1]}"
-    return "–".join(vals)
+            return f"{a[0]}{sep}{vals[1]}"
+    return sep.join(vals)
 
 
 def _convert_measure(m: re.Match, tail: str) -> str:
     unit = re.sub(r"\s+", " ", m.group("unit").lower().replace(".", ""))
     n1, n2, n3 = m.group("n1"), m.group("n2"), m.group("n3")
     nums = [n for n in (n1, n2) if n]
+    sep = LOCALE.number_format.range_sep
 
     if unit.startswith(("tsp", "teaspoon")):
-        return "–".join(_fr(n) for n in nums) + " c. à c."
+        return sep.join(_fr(n) for n in nums) + f" {LOCALE.spoons.tsp}"
     if unit.startswith(("tbsp", "tablespoon")):
-        return "–".join(_fr(n) for n in nums) + " c. à s."
+        return sep.join(_fr(n) for n in nums) + f" {LOCALE.spoons.tbsp}"
     if unit.startswith(("fl oz", "fluid")):
         return _rj([_fmt_vol(_to_float(n) * 29.57) for n in nums])
     if unit.startswith("cup"):
@@ -634,29 +734,36 @@ def _convert_measure(m: re.Match, tail: str) -> str:
     if unit.startswith(("quart", "qt")):
         def _qt(n):
             ml = _to_float(n) * 946
-            return _fmt_vol(ml) if ml < 1000 else _fr(f"{round(ml / 500) / 2:g}") + " l"
+            return (
+                _fmt_vol(ml)
+                if ml < LOCALE.units.volume.l_from_ml
+                else _fr(f"{round(ml / 500) / 2:g}") + f" {LOCALE.units.volume.l_suffix}"
+            )
         return _rj([_qt(n) for n in nums])
     if unit.startswith(("oz", "ounce")):
-        if re.match(r"\s*(?:oven[- ]safe\s+)?(?:ramekins?|glass(?:es)?|mugs?|jars?|cups?)\b", tail):
+        if _CONTAINERS_RE.match(tail):
             return _rj([_fmt_vol(_to_float(n) * 29.57) for n in nums])
         return _rj([_fmt_g(_to_float(n) * 28.35) for n in nums])
     if unit.startswith(("lb", "pound")):
         return _rj([_fmt_g(round(_to_float(n) * 453.59 / 10) * 10) for n in nums])
     if unit.startswith("inch"):
         dims = [n1] + ([n3] if n3 else [])
+        cm_suffix = LOCALE.units.length.cm_suffix
         if n2:
             return _rj([_fmt_cm(_to_float(n) * 2.54) for n in nums])
         if n3:
-            cms = [_fmt_cm(_to_float(n) * 2.54).replace(" cm", "") for n in dims]
-            return " x ".join(cms) + " cm"
+            cms = [_fmt_cm(_to_float(n) * 2.54).replace(f" {cm_suffix}", "") for n in dims]
+            return " x ".join(cms) + f" {cm_suffix}"
         return _fmt_cm(_to_float(n1) * 2.54)
     return m.group(0)
 
 
 def _f_to_c(f: int) -> str:
-    for key, (c, th) in OVEN_MAP.items():
-        if abs(f - key) <= 12:
-            return f"{c}°C (Th. {th})"
+    for key, entry in OVEN_MAP.items():
+        if abs(f - key) <= LOCALE.oven.tolerance_f:
+            if entry.th is not None:
+                return LOCALE.oven.template.format(c=entry.c, th=entry.th)
+            return f"{entry.c}°C"
     c = (f - 32) * 5 / 9
     return f"{round(c / 5) * 5 if c >= 100 else round(c)}°C"
 
@@ -665,7 +772,7 @@ def _convert_temp(m: re.Match) -> str:
     a, b = int(m.group("a")), m.group("b")
     if b:
         ca, cb = _f_to_c(a).split("°C")[0], _f_to_c(int(b))
-        return f"{ca}–{cb}"
+        return f"{ca}{LOCALE.number_format.range_sep}{cb}"
     return _f_to_c(a)
 
 
@@ -698,10 +805,7 @@ def restore_units(text: str, mapping: dict) -> str:
 
 
 def strip_nutrition_block(text: str) -> str:
-    return re.sub(
-        r"(Valeurs nutritionnelles|Nutritional values|Calories\s*:).*$",
-        "", text, flags=re.IGNORECASE | re.DOTALL,
-    ).strip()
+    return _NUTRITION_RE.sub("", text).strip()
 
 
 _EN_INSTR = {"the", "and", "with", "until", "add", "into", "for", "stir", "bake", "over", "then", "about",
