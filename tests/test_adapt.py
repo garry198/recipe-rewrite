@@ -174,6 +174,9 @@ validate_adapt_config("active", 10, force=True, adapt_ids=[1])
 check("format_adapt_exclude_line empty returns None", format_adapt_exclude_line([], [], [], []) is None)
 check("format_adapt_exclude_line formats sorted unique ids",
       format_adapt_exclude_line([9, 2], [5], [2, 1], [5, 7]) == "ADAPT_EXCLUDE_IDS=1,2,5,7,9")
+check("format_adapt_exclude_line includes missing_qty_ids, manual_ids, and existing_exclude_ids",
+      format_adapt_exclude_line([3], [], [], [], missing_qty_ids=[2248], existing_exclude_ids=[10, 2248])
+      == "ADAPT_EXCLUDE_IDS=3,10,2248")
 
 
 # 4. Fake cursor: duplicate skip, success lastrowid, DRY_RUN & no serves CSV
