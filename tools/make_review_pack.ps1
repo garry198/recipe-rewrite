@@ -6,6 +6,9 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $out = "reviews\$Task"; New-Item -ItemType Directory -Force $out | Out-Null
 git diff main...HEAD --stat           | Out-File "$out\stat.txt" -Encoding utf8
+if (Test-Path "$out\merge_resolution.patch") {
+    "`n[merge_resolution.patch included: $out\merge_resolution.patch]" | Out-File "$out\stat.txt" -Append -Encoding utf8
+}
 git diff main...HEAD -U3 -- . ':!*.csv' ':!logs' | Out-File "$out\diff.patch" -Encoding utf8
 git log main..HEAD --format="%h %s" | Out-File "$out\commits.txt" -Encoding utf8
 $testSuites = & "$PSScriptRoot\test_suites.ps1"
@@ -23,10 +26,33 @@ python -m py_compile rewr-transl.py checks.py 2>&1 | Out-File "$out\compile.txt"
 if (-not (Test-Path "$out\worker_notes.md")) {
 @"
 # $Task - worker notes
-## Done
-## NOT done / deviations
-## Questions for Claude
-## How to verify
+
+## Что изменено
+-
+
+## Версии
+- (ничего не поднято / указано что именно и влияние на кэш)
+
+## Тесты
+- Команда: ``.\tools\make_review_pack.ps1 $Task``
+- Итог:
+- Лог: ``reviews/$Task/tests.txt``
+
+## Проверка на эталоне (было/стало)
+- (ожидаемые различия по коду/тестам или «не применимо» с причиной)
+
+## Запись в БД
+- нет
+
+## Что не сделано / отклонения
+- нет
+
+## Вопросы к Claude
+- нет
+
+## Как проверить
+-
 "@ | Out-File "$out\worker_notes.md" -Encoding utf8
 }
-Write-Host "Pack: $out. Fill worker_notes.md, then send diff.patch, stat.txt, tests.txt, worker_notes.md to Claude"
+$extra = if (Test-Path "$out\merge_resolution.patch") { ", merge_resolution.patch" } else { "" }
+Write-Host "Pack: $out. Fill worker_notes.md, then send diff.patch, stat.txt, tests.txt, worker_notes.md$extra to Claude"
