@@ -25,9 +25,36 @@
 - r10 — учёт аккаунта и контекста запуска в `api_usage.csv` (`GEMINI_ACCOUNT_LABEL`, дефолт `"main"` — согласовано с `cost-nutrients (q41.8)` и `Book Pipeline`, `key_fp`, `api_usage_report.py`; **слита** в `main`)
 - r11 — надёжность процесса: тесты перед слиянием (`tools/test_suites.ps1`), повтор API + split, лимит `MAX_RUN_COST_USD` (**слита** в `main`)
 - r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`) (**слита** в `main`)
-- r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (в `worker/r11c`)
+- r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (**слита** в `main`)
+- r11d — обновление стартовых файлов для ИИ (`STATE.md`, `AGENTS.md`, `WORKFLOW.md`)
 - r12 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
 - r13 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+
+## Оперативный статус (на 2026-11-24)
+
+**Адаптация `recipes3` → `recipe_rewrite` (режим `adapt`):**
+- Записаны 30 рецептов (`recipe_rewrite.id` `9434–9463`); 20 из них посчитаны `cost-nutrients` и активируются владельцем (`id`: `9434, 9435, 9437, 9438, 9441, 9443, 9444, 9446–9449, 9452, 9454, 9455, 9457, 9459–9463`).
+- Ждут `cost-nutrients` (правка движка, q45): `9436, 9439, 9440, 9450, 9451, 9453, 9458`; ждут пересчёта после правки текста: `9442, 9445, 9456`.
+- Волна A (10 новых вставок, `recipes3.id` `2248, 2250, 2252, 2253, 2254, 2255, 2257, 2261, 2264, 2265`, `ADAPT_FORCE=0`): ещё не запускалась. Исключены `ADAPT_EXCLUDE_IDS=4423,4436`.
+
+**Переделка старых рерайтов (`FORCE`, источники без количеств):**
+- Первая волна 23 строки: 22 `active`, `1622` `draft` (нужен продукт «keto bread mix» в `cost-nutrients`).
+- Волна B (`recipes3.id` `1796, 2408, 2499, 2505, 3801, 3813` → `recipe_rewrite.id` `4364, 4938, 5031, 5037, 8432, 8444`): записана; `4938, 5031, 8444` посчитаны, `4364, 5037, 8432` ждут пересчёта после правки текста.
+- Известные 25 активных рерайтов с источником без количеств: `recipe_rewrite.id` `1186, 4938, 4943, 5019–5038, 8432, 8444` (в книге: `5031, 5037, 8432, 8444`); часть исправлена волной B, остальные ждут исправленных страниц `recipe-ingest`.
+
+**Открыто:**
+- `1570` — ссылка на рецепт, рерайт вручную.
+- 9 рецептов группы C на проверку: `368, 808, 932, 1003, 2709, 2777, 2999, 3017, 3494`.
+- Расхождение биллинга Google с оценкой (в `api_usage.csv` теперь пишутся `account_label`/`key_fp`).
+- DE на живом API не пробовали.
+
+## Как проходит волна
+1. В `.env` задать: `APP_MODE=adapt`, `ADAPT_IDS` (или `ADAPT_LIMIT`), `ADAPT_FORCE=0/1`, `ADAPT_EXCLUDE_IDS`, `RESCALE_TARGET_SERVINGS=4`, `GEMINI_ACCOUNT_LABEL=main`, `DRY_RUN=1`.
+2. Запустить `DRY_RUN=1` (платный, результаты сохраняются в кэш) → проверить `logs/force_report_*.md` → переключить `DRY_RUN=0`, боевой запуск из кэша.
+3. Записанные `recipe_rewrite.id` взять из `logs/rewrite_ids_adapt_<ts>.txt` и отправить в `cost-nutrients` через `_hub`.
+4. `cost-nutrients` считает КБЖУ и цену (`needs_reprice` → `0`).
+5. Claude проверяет КБЖУ и цены; активацию (`UPDATE status='active'`) и правки текста выполняет только владелец.
+6. Откат `FORCE`: `tools/rollback_force.py` по `backups/recipe_rewrite_force_<ts>.jsonl` (`dry-run` по умолчанию, `--apply` для записи).
 
 Процесс: воркер в `worker/rNN` (локальные коммиты) → `make_review_pack.ps1` → приёмка Claude → слияние владельцем через `.\tools\merge_branch.ps1 worker/rNN` (без GitHub PR).
 
