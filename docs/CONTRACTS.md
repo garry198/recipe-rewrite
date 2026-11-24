@@ -24,7 +24,14 @@
 4. Инструкции: обычный текст, абзац на шаг, пустая строка между шагами, без нумерации (Book Pipeline сам нумерует
    — ПРОВЕРИТЬ; его промпт пересчёта порций v4.1 ожидает нумерованные шаги, возможный конфликт форматов).
 5. Нет КБЖУ в тексте (считает cost-nutrients).
-6. В режиме `adapt` (`recipes3` → `recipe_rewrite`): `INSERT INTO recipe_rewrite` с ключом `(recipe_id, market, locale, variant_type)` (`variant_type='rewrite'`, `market='US'`, `locale='en_US'`, `status=ADAPT_STATUS` ∈ `{draft, active, archived}`, `currency='USD'`); поля КБЖУ, `dish_cost_local`, `nutrients_recalc_version`, `needs_reprice`, `dish_cost_serves` остаются `NULL`/`DEFAULT` (их считает `cost-nutrients`).
+6. В режиме `adapt` (`recipes3` → `recipe_rewrite`): `INSERT INTO recipe_rewrite` с ключом `(recipe_id, market, locale, variant_type)` (`variant_type='rewrite'`, `market='US'`, `locale='en_US'`, `status=ADAPT_STATUS` ∈ `{draft, active, archived}`, `currency='USD'`, `needs_reprice=1`, `dish_cost_serves=serves`); поля КБЖУ, `dish_cost_local`, `nutrients_recalc_version` остаются `NULL` (при `ADAPT_FORCE=1` обнуляются, т.к. после смены порций устарели).
+7. В режиме `rewrite` (`UPDATE`) и `translate` (`INSERT`/`ON DUPLICATE KEY UPDATE`) также выставляются `needs_reprice=1` и `dish_cost_serves=serves` (в `translate` `dish_cost_local` не копируется).
+8. После успешного `commit` батча при `DRY_RUN=false` id вставленных/обновлённых строк `recipe_rewrite.id` пишутся в `logs\rewrite_ids_<mode>_<YYYYmmdd_HHMMSS>.txt` (настройка `IDS_OUT_DIR`, UTF-8, LF).
+9. Контракт `cost-nutrients` и цикл запуска:
+   - `cost-nutrients` отбирает рецепты по `locale` или списку `id` минус строки со свежей (`<= 21` дня) текущей ценой в `price_history`; по `nutrients_recalc_version IS NULL` и `needs_reprice` не ищет.
+   - `needs_reprice` `cost-nutrients` только сбрасывает (`= 0` при записи результата); при выгрузке для книги (`Book Pipeline`) строки с `needs_reprice <> 0` пропускаются.
+   - Для изменённых (а не новых) строк нужен явный `--ids-file`.
+   - Рабочий цикл: `dry-run`, затем волна записи с `--ids-file` по `procedures/db_write.md`.
 
 ## Чего rewrite не делает
 Не считает цены и КБЖУ, не пересчитывает порции для книги (это Book Pipeline), не парсит сайты (recipe-ingest).
