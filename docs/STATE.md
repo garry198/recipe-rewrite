@@ -17,9 +17,10 @@
 - r02 — промпт v3_5 как дефолт (дубликат v3_6 удалён), порог масштабирования 8, тесты (**слита** в `main`)
 - r03 — дизайн-документ «локали как данные» (`locales/fr_FR.yaml`, `de_DE.yaml`): словарь, меры, духовка, форматы записи (**слита** в `main`)
 - r04 — реализация слоя локалей, FR переносится без изменения результата (регресс по логам) (**слита** в `main`)
-- r05 — DE: промпт, меры (г/мл, EL/TL, Prise), духовка (Ober-/Unterhitze, Umluft), тесты (реализовано в `worker/r05`)
-- r06 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
-- r07 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+- r05 — DE: промпт, меры (г/мл, EL/TL, Prise), духовка (Ober-/Unterhitze, Umluft), тесты (**слита** в `main`)
+- r06 — режим `adapt`: `recipes3` → рерайт → `INSERT` в `recipe_rewrite` + контракт `cost-nutrients` (`r06.9`, `r06.10`: `FORCE` с `ADAPT_IDS`, `ADAPT_EXCLUDE_IDS`, `LAST_INSERT_ID(id)`, в `worker/r06`)
+- r07 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
+- r08 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
 Процесс: воркер в `worker/rNN` (локальные коммиты) → `make_review_pack.ps1` → приёмка Claude → слияние владельцем через `.\tools\merge_branch.ps1 worker/rNN` (без GitHub PR).
 

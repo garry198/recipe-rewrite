@@ -64,8 +64,8 @@ logging.getLogger("google.auth").setLevel(logging.WARNING)
 
 # ================= НАСТРОЙКИ =================
 APP_MODE = os.getenv("APP_MODE", "rewrite").lower()
-if APP_MODE not in ("rewrite", "translate"):
-    raise ValueError("APP_MODE должен быть 'rewrite' или 'translate'")
+if APP_MODE not in ("rewrite", "translate", "adapt"):
+    raise ValueError("APP_MODE должен быть 'rewrite', 'translate' или 'adapt'")
 
 FETCH_SIZE = int(os.getenv("FETCH_SIZE", "3"))
 SLEEP_BETWEEN_REQUESTS = float(os.getenv("SLEEP_BETWEEN_REQUESTS", "2.0"))
@@ -73,6 +73,15 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
 
 REWRITE_IDS_RAW = os.getenv("REWRITE_IDS", "").strip()
 TRANSLATE_IDS_RAW = os.getenv("TRANSLATE_IDS", "").strip()
+ADAPT_IDS_RAW = os.getenv("ADAPT_IDS", "").strip()
+ADAPT_EXCLUDE_IDS_RAW = os.getenv("ADAPT_EXCLUDE_IDS", "").strip()
+ADAPT_LIMIT = int(os.getenv("ADAPT_LIMIT", "10"))
+ADAPT_DISH_TYPES_RAW = os.getenv("ADAPT_DISH_TYPES", "").strip()
+ADAPT_MARKET = os.getenv("ADAPT_MARKET", "US")
+ADAPT_LOCALE = os.getenv("ADAPT_LOCALE", "en_US")
+ADAPT_STATUS = os.getenv("ADAPT_STATUS", "active").lower()
+ADAPT_FORCE = os.getenv("ADAPT_FORCE", "0").lower() in {"1", "true", "yes", "on"}
+VALID_ADAPT_STATUSES = ("draft", "active", "archived")
 
 RESCALE_TARGET_SERVINGS = int(os.getenv("RESCALE_TARGET_SERVINGS", "4"))
 # Если делитель больше этого значения (16 порций -> 4 = x4), цель удваивается (16 -> 8), чтобы не получать 1/4 яйца.
@@ -98,6 +107,7 @@ else:
     SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "prompts/desserts_rewrite_prompt_v3_5.txt")
 
 CSV_LOG_FILE = BASE_DIR / os.getenv("CSV_LOG_FILE", "rewrite_update_log.csv")
+IDS_OUT_DIR = BASE_DIR / os.getenv("IDS_OUT_DIR", "logs")
 CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -110,6 +120,7 @@ EXPECTED_CSV_HEADER = [
     "Prep Time (min)", "Cook Time (min)",
     "Previous Ingredients", "Rewritten Ingredients",
     "Previous Instructions", "Rewritten Instructions",
+    "recipe_id", "recipe_rewrite_id", "Status",
 ]
 
 MODEL_PRICING_USD_PER_MILLION = {
@@ -994,22 +1005,40 @@ def init_csv_log(filepath: Path) -> None:
         writer.writerow(EXPECTED_CSV_HEADER)
 
 
-def append_csv_batch(filepath: Path, batch_data: list[tuple[dict, RewrittenRecipe]]) -> None:
+def append_csv_batch(filepath: Path, batch_data: list[tuple[dict, RewrittenRecipe | None, int | None, str]]) -> None:
     if not batch_data:
         return
     rows_to_write = []
-    for previous, rewritten in batch_data:
+    for previous, rewritten, rewrite_id_out, status_note in batch_data:
         rows_to_write.append([
-            previous["rewrite_row_id"], previous["recipe_id"],
-            previous.get("dish_name", ""), rewritten.dish_name,
-            previous.get("serves", ""), rewritten.servings,
+            previous.get("rewrite_row_id") if previous.get("rewrite_row_id") is not None else "",
+            previous["recipe_id"],
+            previous.get("dish_name", ""),
+            rewritten.dish_name if rewritten else "",
+            previous.get("serves", ""),
+            rewritten.servings if rewritten else "",
             previous.get("prep_time_minutes", ""), previous.get("cook_time_minutes", ""),
-            previous.get("ingredients_list", ""), rewritten.ingredients_list,
-            previous.get("cooking_instructions", ""), rewritten.cooking_instructions,
+            previous.get("ingredients_list", ""),
+            rewritten.ingredients_list if rewritten else "",
+            previous.get("cooking_instructions", ""),
+            rewritten.cooking_instructions if rewritten else "",
+            previous["recipe_id"],
+            rewrite_id_out if rewrite_id_out is not None else "",
+            status_note,
         ])
     with filepath.open(mode="a", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f, delimiter=";")
         writer.writerows(rows_to_write)
+
+
+def append_ids_file(filepath: Path, row_ids: Sequence[int]) -> int:
+    if not row_ids:
+        return 0
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    payload = "\n".join(str(int(rid)) for rid in row_ids) + "\n"
+    with filepath.open(mode="a", encoding="utf-8", newline="\n") as f:
+        f.write(payload)
+    return len(row_ids)
 
 
 def parse_rewrite_ids(raw: str) -> list[int]:
@@ -1088,54 +1117,229 @@ def normalize_servings(value: Any) -> int | None:
     return ivalue if ivalue > 0 else None
 
 
+def validate_adapt_config(
+    status: str,
+    limit: int,
+    force: bool = False,
+    adapt_ids: Sequence[int] = (),
+) -> None:
+    if status not in VALID_ADAPT_STATUSES:
+        raise ValueError(
+            f"Недопустимое значение ADAPT_STATUS={status!r}. Допустимо: {', '.join(VALID_ADAPT_STATUSES)}"
+        )
+    if limit <= 0:
+        raise ValueError(f"ADAPT_LIMIT должен быть > 0, получено: {limit}")
+    if force and not adapt_ids:
+        raise ValueError("ADAPT_FORCE=1 требует явный ADAPT_IDS")
+
+
+def parse_dish_types(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def build_adapt_select(
+    market: str,
+    locale: str,
+    limit: int,
+    recipe_ids: Sequence[int] = (),
+    dish_types: Sequence[str] = (),
+    force: bool = False,
+    exclude_ids: Sequence[int] = (),
+) -> tuple[str, tuple[Any, ...]]:
+    where_parts: list[str] = ["r.serves IS NOT NULL AND r.serves > 0"]
+    params: list[Any] = [market, locale]
+    if not force:
+        where_parts.append("w.id IS NULL")
+    if recipe_ids:
+        placeholders = ", ".join("?" for _ in recipe_ids)
+        where_parts.append(f"r.id IN ({placeholders})")
+        params.extend(recipe_ids)
+    if exclude_ids:
+        placeholders = ", ".join("?" for _ in exclude_ids)
+        where_parts.append(f"r.id NOT IN ({placeholders})")
+        params.extend(exclude_ids)
+    if dish_types:
+        placeholders = ", ".join("?" for _ in dish_types)
+        where_parts.append(f"r.dish_type IN ({placeholders})")
+        params.extend(dish_types)
+    where_clause = f"WHERE {' AND '.join(where_parts)} "
+    sql = (
+        "SELECT r.id AS recipe_id, r.dish_name, r.ingredients_list, r.cooking_instructions, "
+        "r.serves, r.prep_time_minutes, r.cook_time_minutes, r.dish_type "
+        "FROM recipes3 r "
+        "LEFT JOIN recipe_rewrite w ON w.recipe_id = r.id AND w.market = ? AND w.locale = ? "
+        "AND w.variant_type = 'rewrite' "
+        f"{where_clause}"
+        "ORDER BY r.id LIMIT ?"
+    )
+    params.append(limit)
+    return sql, tuple(params)
+
+
+def fetch_adapt_rows(
+    connection: mariadb.Connection,
+    market: str,
+    locale: str,
+    limit: int,
+    recipe_ids: Sequence[int] = (),
+    dish_types: Sequence[str] = (),
+    force: bool = False,
+    exclude_ids: Sequence[int] = (),
+) -> list[dict[str, Any]]:
+    sql, params = build_adapt_select(
+        market, locale, limit, recipe_ids, dish_types, force, exclude_ids=exclude_ids,
+    )
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+
+
+def build_adapt_insert_sql(force: bool = False) -> str:
+    base = """
+        INSERT INTO recipe_rewrite (
+            recipe_id, market, locale, variant_type, status,
+            dish_name_variant, ingredients_list_variant, cooking_instructions_variant,
+            instructions_hash, serves, dish_cost_serves, needs_reprice,
+            prep_time_minutes, cook_time_minutes, currency, ai_model
+        ) VALUES (?, ?, ?, 'rewrite', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'USD', ?)
+    """
+    if not force:
+        return base.strip()
+    return (
+        base.strip()
+        + """
+        ON DUPLICATE KEY UPDATE
+            id = LAST_INSERT_ID(id),
+            status = VALUES(status),
+            dish_name_variant = VALUES(dish_name_variant),
+            ingredients_list_variant = VALUES(ingredients_list_variant),
+            cooking_instructions_variant = VALUES(cooking_instructions_variant),
+            instructions_hash = VALUES(instructions_hash),
+            serves = VALUES(serves),
+            dish_cost_serves = VALUES(dish_cost_serves),
+            needs_reprice = 1,
+            calories_per_person = NULL,
+            proteins_per_person = NULL,
+            fats_per_person = NULL,
+            carbohydrates_per_person = NULL,
+            netcarbs_per_person = NULL,
+            dish_cost_local = NULL,
+            nutrients_recalc_version = NULL,
+            prep_time_minutes = VALUES(prep_time_minutes),
+            cook_time_minutes = VALUES(cook_time_minutes),
+            currency = VALUES(currency),
+            ai_model = VALUES(ai_model),
+            updated_at = NOW()
+        """.rstrip()
+    )
+
+
+def save_adapted_recipe(
+    connection: mariadb.Connection,
+    source_row: dict[str, Any],
+    data: RewrittenRecipe,
+    ai_model: str,
+    market: str,
+    locale: str,
+    status: str,
+    force: bool = False,
+) -> tuple[int | None, str]:
+    instructions_hash = hashlib.sha256(data.cooking_instructions.encode("utf-8")).hexdigest()
+    sql = build_adapt_insert_sql(force=force)
+    params = (
+        int(source_row["recipe_id"]),
+        market,
+        locale,
+        status,
+        source_row.get("dish_name") or "",
+        data.ingredients_list,
+        data.cooking_instructions,
+        instructions_hash,
+        data.servings,
+        data.servings,
+        source_row.get("prep_time_minutes"),
+        source_row.get("cook_time_minutes"),
+        ai_model,
+    )
+    cursor = connection.cursor()
+    try:
+        cursor.execute(sql, params)
+        return getattr(cursor, "lastrowid", None), "OK"
+    except mariadb.IntegrityError as exc:
+        if not force:
+            LOGGER.warning(f"ID {source_row['recipe_id']}: exists, skipped ({exc})")
+            return None, "exists, skipped"
+        raise
+    finally:
+        cursor.close()
+
+
+def build_rewrite_update_sql() -> str:
+    return """
+        UPDATE recipe_rewrite SET ingredients_list_variant = ?, cooking_instructions_variant = ?,
+        instructions_hash = ?, serves = ?, dish_cost_serves = ?, needs_reprice = 1,
+        ai_model = ?, updated_at = NOW()
+        WHERE id = ?
+    """.strip()
+
+
+def build_translate_insert_sql() -> str:
+    return """
+        INSERT INTO recipe_rewrite (
+            recipe_id, market, locale, variant_type, dish_name_variant, ingredients_list_variant,
+            cooking_instructions_variant, instructions_hash, serves, dish_cost_serves, needs_reprice,
+            prep_time_minutes, cook_time_minutes, currency,
+            calories_per_person, proteins_per_person, fats_per_person,
+            carbohydrates_per_person, netcarbs_per_person,
+            ai_model, created_at, updated_at
+        )
+        SELECT
+            recipe_id, ?, ?, variant_type, ?, ?, ?, ?,
+            serves, serves, 1, prep_time_minutes, cook_time_minutes, ?,
+            calories_per_person, proteins_per_person, fats_per_person,
+            carbohydrates_per_person, netcarbs_per_person,
+            ?, NOW(), NOW()
+        FROM recipe_rewrite
+        WHERE id = ?
+        ON DUPLICATE KEY UPDATE
+            id = LAST_INSERT_ID(id),
+            dish_name_variant = VALUES(dish_name_variant),
+            ingredients_list_variant = VALUES(ingredients_list_variant),
+            cooking_instructions_variant = VALUES(cooking_instructions_variant),
+            instructions_hash = VALUES(instructions_hash),
+            dish_cost_serves = VALUES(dish_cost_serves),
+            needs_reprice = 1,
+            currency = VALUES(currency),
+            ai_model = VALUES(ai_model),
+            updated_at = NOW()
+    """.strip()
+
+
 def save_rewritten_recipe(connection: mariadb.Connection, source_row_id: int, data: RewrittenRecipe,
-                          ai_model: str) -> None:
+                          ai_model: str) -> int | None:
     instructions_hash = hashlib.sha256(data.cooking_instructions.encode("utf-8")).hexdigest()
     cursor = connection.cursor()
     try:
         if APP_MODE == "rewrite":
-            sql = """
-                UPDATE recipe_rewrite SET ingredients_list_variant = ?, cooking_instructions_variant = ?,
-                instructions_hash = ?, serves = ?, ai_model = ?, updated_at = NOW()
-                WHERE id = ?
-            """
-            cursor.execute(sql, (
+            cursor.execute(build_rewrite_update_sql(), (
                 data.ingredients_list, data.cooking_instructions, instructions_hash, data.servings,
-                ai_model, source_row_id,
+                data.servings, ai_model, source_row_id,
             ))
+            return source_row_id
 
         elif APP_MODE == "translate":
-            sql = """
-                INSERT INTO recipe_rewrite (
-                    recipe_id, market, locale, variant_type, dish_name_variant, ingredients_list_variant,
-                    cooking_instructions_variant, instructions_hash, serves,
-                    prep_time_minutes, cook_time_minutes, currency,
-                    calories_per_person, proteins_per_person, fats_per_person,
-                    carbohydrates_per_person, netcarbs_per_person,
-                    ai_model, created_at, updated_at
-                )
-                SELECT
-                    recipe_id, ?, ?, variant_type, ?, ?, ?, ?,
-                    serves, prep_time_minutes, cook_time_minutes, ?,
-                    calories_per_person, proteins_per_person, fats_per_person,
-                    carbohydrates_per_person, netcarbs_per_person,
-                    ?, NOW(), NOW()
-                FROM recipe_rewrite
-                WHERE id = ?
-                ON DUPLICATE KEY UPDATE
-                    dish_name_variant = VALUES(dish_name_variant),
-                    ingredients_list_variant = VALUES(ingredients_list_variant),
-                    cooking_instructions_variant = VALUES(cooking_instructions_variant),
-                    instructions_hash = VALUES(instructions_hash),
-                    currency = VALUES(currency),
-                    ai_model = VALUES(ai_model),
-                    updated_at = NOW()
-            """
-            cursor.execute(sql, (
+            cursor.execute(build_translate_insert_sql(), (
                 TARGET_MARKET, TARGET_LOCALE, data.dish_name, data.ingredients_list, data.cooking_instructions,
                 instructions_hash, TARGET_CURRENCY,
                 ai_model, source_row_id,
             ))
+            return getattr(cursor, "lastrowid", None)
+        return None
     finally:
         cursor.close()
 
@@ -1401,7 +1605,8 @@ def build_batch_prompt(rows: Sequence[dict[str, Any]]) -> str:
 
     for row in rows:
         src_servings = normalize_servings(row.get("serves")) or 1
-        prompt_lines.append(f"--- REWRITE ROW ID {row['rewrite_row_id']} ---")
+        prompt_id = row["rewrite_row_id"] if row.get("rewrite_row_id") is not None else row["recipe_id"]
+        prompt_lines.append(f"--- REWRITE ROW ID {prompt_id} ---")
         prompt_lines.append(f"Current Servings: {src_servings}")
         if row.get("scale_note"):
             prompt_lines.append(f"System note: {row['scale_note']}")
@@ -1429,14 +1634,34 @@ def validate_locale_env_sync() -> None:
         )
 
 
+def format_adapt_exclude_line(
+    manual_ids: Sequence[int],
+    failed_ids: Sequence[int],
+    invalid_servings_ids: Sequence[int],
+    skipped_exists_ids: Sequence[int],
+) -> str | None:
+    all_ids = sorted(set(manual_ids) | set(failed_ids) | set(invalid_servings_ids) | set(skipped_exists_ids))
+    if not all_ids:
+        return None
+    return f"ADAPT_EXCLUDE_IDS={','.join(map(str, all_ids))}"
+
+
 def main() -> int:
     validate_locale_env_sync()
-    ids_raw = REWRITE_IDS_RAW if APP_MODE == "rewrite" else TRANSLATE_IDS_RAW
-    rewrite_ids = parse_rewrite_ids(ids_raw)
-
-    if not rewrite_ids:
-        LOGGER.error(f"Не заданы ID для режима {APP_MODE.upper()} в .env.")
-        return 1
+    is_rewrite_pipeline = APP_MODE in ("rewrite", "adapt")
+    if APP_MODE == "adapt":
+        adapt_ids_list = parse_rewrite_ids(ADAPT_IDS_RAW)
+        adapt_exclude_list = parse_rewrite_ids(ADAPT_EXCLUDE_IDS_RAW)
+        validate_adapt_config(ADAPT_STATUS, ADAPT_LIMIT, force=ADAPT_FORCE, adapt_ids=adapt_ids_list)
+        rewrite_ids: list[int] = []
+    else:
+        adapt_ids_list = []
+        adapt_exclude_list = []
+        ids_raw = REWRITE_IDS_RAW if APP_MODE == "rewrite" else TRANSLATE_IDS_RAW
+        rewrite_ids = parse_rewrite_ids(ids_raw)
+        if not rewrite_ids:
+            LOGGER.error(f"Не заданы ID для режима {APP_MODE.upper()} в .env.")
+            return 1
 
     try:
         system_prompt = SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip()
@@ -1483,9 +1708,42 @@ def main() -> int:
         LOGGER.error(f"Ошибка подключения к БД: {exc}")
         return 1
 
-    batches = [rewrite_ids[i:i + FETCH_SIZE] for i in range(0, len(rewrite_ids), FETCH_SIZE)]
     failed_ids, missing_in_db, invalid_servings_ids, manual_ids = [], [], [], []
     missing_qty_ids: list[int] = []
+    skipped_exists_ids: list[int] = []
+    ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    total_saved_ids = 0
+
+    if APP_MODE == "adapt":
+        adapt_rows = fetch_adapt_rows(
+            connection,
+            ADAPT_MARKET,
+            ADAPT_LOCALE,
+            ADAPT_LIMIT,
+            recipe_ids=adapt_ids_list,
+            dish_types=parse_dish_types(ADAPT_DISH_TYPES_RAW),
+            force=ADAPT_FORCE,
+            exclude_ids=adapt_exclude_list,
+        )
+        eligible_adapt_rows: list[dict[str, Any]] = []
+        skipped_csv: list[tuple[dict, RewrittenRecipe | None, int | None, str]] = []
+        for r in adapt_rows:
+            r["rewrite_row_id"] = None
+            if normalize_servings(r.get("serves")) is None:
+                LOGGER.warning(f"ID {r['recipe_id']}: нет корректного serves — пропущен (no serves).")
+                invalid_servings_ids.append(int(r["recipe_id"]))
+                skipped_csv.append((r, None, None, "no serves"))
+            else:
+                eligible_adapt_rows.append(r)
+        if skipped_csv:
+            append_csv_batch(CSV_LOG_FILE, skipped_csv)
+        batches_rows: list[list[dict[str, Any]]] = [
+            eligible_adapt_rows[i:i + FETCH_SIZE] for i in range(0, len(eligible_adapt_rows), FETCH_SIZE)
+        ]
+        batches = [[int(r["recipe_id"]) for r in b] for b in batches_rows]
+    else:
+        batches_rows = []
+        batches = [rewrite_ids[i:i + FETCH_SIZE] for i in range(0, len(rewrite_ids), FETCH_SIZE)]
 
     try:
         for batch_number, batch_ids in enumerate(batches, start=1):
@@ -1496,8 +1754,12 @@ def main() -> int:
             cache_hits: dict[int, RewrittenRecipe] = {}
 
             try:
-                rows = fetch_rewrite_rows(connection, batch_ids)
-                rows_by_id = {int(r["rewrite_row_id"]): r for r in rows}
+                if APP_MODE == "adapt":
+                    rows = batches_rows[batch_number - 1]
+                    rows_by_id = {int(r["recipe_id"]): r for r in rows}
+                else:
+                    rows = fetch_rewrite_rows(connection, batch_ids)
+                    rows_by_id = {int(r["rewrite_row_id"]): r for r in rows}
 
                 missing = [rid for rid in batch_ids if rid not in rows_by_id]
                 if missing:
@@ -1515,7 +1777,7 @@ def main() -> int:
                 api_requests: list[int] = []
 
                 for rid in list(eligible_ids):
-                    if APP_MODE == "rewrite" and SKIP_MULTI_VARIANT:
+                    if is_rewrite_pipeline and SKIP_MULTI_VARIANT:
                         dups = multi_variant_dups(rows_by_id[rid].get("ingredients_list") or "")
                         if len(dups) >= MULTI_VARIANT_MIN_DUPS:
                             LOGGER.error(
@@ -1525,7 +1787,7 @@ def main() -> int:
                             manual_ids.append(rid)
                             eligible_ids.remove(rid)
 
-                if APP_MODE == "rewrite" and SKIP_NO_QUANTITIES:
+                if is_rewrite_pipeline and SKIP_NO_QUANTITIES:
                     for rid in list(eligible_ids):
                         ratio, n_lines = no_quantity_ratio(rows_by_id[rid].get("ingredients_list") or "")
                         if n_lines >= NO_QTY_MIN_LINES and ratio >= NO_QTY_RATIO:
@@ -1540,7 +1802,8 @@ def main() -> int:
 
                 for rid in eligible_ids:
                     fingerprint = row_fingerprint(rows_by_id[rid])
-                    cache_file = CACHE_DIR / f"{rid}_{run_hash}_{fingerprint}.json"
+                    cache_id = f"r3_{rid}" if APP_MODE == "adapt" else str(rid)
+                    cache_file = CACHE_DIR / f"{cache_id}_{run_hash}_{fingerprint}.json"
 
                     if cache_file.exists():
                         try:
@@ -1557,8 +1820,8 @@ def main() -> int:
                     else:
                         api_requests.append(rid)
 
-                # === Кэш-хиты: проверки рерайта ТОЛЬКО в режиме rewrite ===
-                if APP_MODE == "rewrite":
+                # === Кэш-хиты: проверки рерайта в режимах rewrite и adapt ===
+                if is_rewrite_pipeline:
                     for rid in list(cache_hits.keys()):
                         item = cache_hits[rid]
                         warns = validate_and_fix_rewrite(item, rows_by_id[rid])
@@ -1580,13 +1843,14 @@ def main() -> int:
                     for r in ordered_rows_for_ai:
                         pr = dict(r)
                         src_srv = normalize_servings(r.get("serves")) or 1
+                        row_key = int(r["recipe_id"] if APP_MODE == "adapt" else r["rewrite_row_id"])
 
-                        if APP_MODE == "rewrite":
+                        if is_rewrite_pipeline:
                             merged = merge_broken_lines(r.get("ingredients_list") or "")
                             pr["ingredients_list"] = strip_recipe_refs(merged)
                             if "recipe" in pr["ingredients_list"].lower():
                                 LOGGER.warning(
-                                    f"ID {r['rewrite_row_id']}: в ингредиентах осталось слово 'recipe' "
+                                    f"ID {row_key}: в ингредиентах осталось слово 'recipe' "
                                     f"после strip_recipe_refs — проверьте вручную."
                                 )
 
@@ -1594,13 +1858,13 @@ def main() -> int:
                             mapping: dict[str, str] = {}
                             pr["ingredients_list"] = protect_units(r.get("ingredients_list") or "", mapping)
                             pr["cooking_instructions"] = protect_units(r.get("cooking_instructions") or "", mapping)
-                            protected[int(r["rewrite_row_id"])] = {
+                            protected[row_key] = {
                                 "ingredients": pr["ingredients_list"],
                                 "instructions": pr["cooking_instructions"],
                                 "mapping": mapping,
                                 "servings": src_srv,
                             }
-                        elif APP_MODE == "rewrite" and target_servings_for(src_srv) != src_srv:
+                        elif is_rewrite_pipeline and target_servings_for(src_srv) != src_srv:
                             new_srv = target_servings_for(src_srv)
                             factor = new_srv / src_srv
                             if abs(factor - 1.0) > 1e-5:
@@ -1608,7 +1872,7 @@ def main() -> int:
                                     pr["ingredients_list"], pr["cooking_instructions"], factor,
                                 )
                                 for w in scale_warns:
-                                    LOGGER.warning(f"ID {r['rewrite_row_id']}: {w}")
+                                    LOGGER.warning(f"ID {row_key}: {w}")
                             pr["serves"] = new_srv
                             pr["scale_note"] = (
                                 f"The system scaled this recipe from {src_srv} to {new_srv} servings "
@@ -1662,7 +1926,7 @@ def main() -> int:
 
                         valid_results: list[RewrittenRecipe] = []
                         for item in batch_result.results:
-                            if APP_MODE == "rewrite":
+                            if is_rewrite_pipeline:
                                 warns = validate_and_fix_rewrite(
                                     item, rows_by_id[item.rewrite_row_id],
                                 )
@@ -1736,11 +2000,13 @@ def main() -> int:
 
                     for item in valid_results:
                         fingerprint = row_fingerprint(rows_by_id[item.rewrite_row_id])
-                        cache_file = CACHE_DIR / f"{item.rewrite_row_id}_{run_hash}_{fingerprint}.json"
+                        cache_id = f"r3_{item.rewrite_row_id}" if APP_MODE == "adapt" else str(item.rewrite_row_id)
+                        cache_file = CACHE_DIR / f"{cache_id}_{run_hash}_{fingerprint}.json"
                         cache_file.write_text(item.model_dump_json(), encoding="utf-8")
                         result_by_id[item.rewrite_row_id] = item
 
-                csv_buffer: list[tuple[dict, RewrittenRecipe]] = []
+                csv_buffer: list[tuple[dict, RewrittenRecipe | None, int | None, str]] = []
+                batch_saved_ids: list[int] = []
                 for rid in eligible_ids:
                     rewritten = result_by_id.get(rid)
                     if not rewritten:
@@ -1750,15 +2016,33 @@ def main() -> int:
                     source_tag = "CACHE" if rid in cache_hits else "API"
 
                     LOGGER.info(f"[{source_tag}] ID {rid} | Порции: {src_servings} -> {rewritten.servings}")
-                    csv_buffer.append((rows_by_id[rid], rewritten))
 
                     if not DRY_RUN:
-                        save_rewritten_recipe(
-                            connection, int(rows_by_id[rid]["rewrite_row_id"]), rewritten, GEMINI_MODEL,
-                        )
+                        if APP_MODE == "adapt":
+                            saved_id, save_status = save_adapted_recipe(
+                                connection, rows_by_id[rid], rewritten, GEMINI_MODEL,
+                                ADAPT_MARKET, ADAPT_LOCALE, ADAPT_STATUS, force=ADAPT_FORCE,
+                            )
+                            if save_status == "OK" and saved_id:
+                                batch_saved_ids.append(int(saved_id))
+                            elif save_status == "exists, skipped":
+                                skipped_exists_ids.append(int(rows_by_id[rid]["recipe_id"]))
+                        else:
+                            saved_id = save_rewritten_recipe(
+                                connection, int(rows_by_id[rid]["rewrite_row_id"]), rewritten, GEMINI_MODEL,
+                            )
+                            save_status = "OK"
+                            if saved_id:
+                                batch_saved_ids.append(int(saved_id))
+                    else:
+                        saved_id = None if APP_MODE == "adapt" else int(rows_by_id[rid]["rewrite_row_id"])
+                        save_status = "DRY_RUN"
+
+                    csv_buffer.append((rows_by_id[rid], rewritten, saved_id, save_status))
 
                 if not DRY_RUN:
                     connection.commit()
+                    total_saved_ids += append_ids_file(ids_out_file, batch_saved_ids)
 
                 try:
                     append_csv_batch(CSV_LOG_FILE, csv_buffer)
@@ -1809,6 +2093,8 @@ def main() -> int:
         else:
             LOGGER.info("=== РАСХОДЫ НА API (СЕАНС) ===")
             LOGGER.info("Все данные взяты из кэша. Запросов к API не было. Потрачено: $0.0000 USD")
+        if not DRY_RUN and total_saved_ids > 0:
+            LOGGER.info(f"Файл ID для cost-nutrients: {ids_out_file} ({total_saved_ids} ID)")
 
     if missing_in_db:
         LOGGER.warning(f"Пропущено (нет в БД): {len(missing_in_db)} ID")
@@ -1822,9 +2108,15 @@ def main() -> int:
         LOGGER.error(f"Упали или отклонены ИИ: {sorted(set(failed_ids))}")
         LOGGER.error(
             f"Для повтора (успешные берутся из кэша): "
-            f"{'TRANSLATE_IDS' if APP_MODE == 'translate' else 'REWRITE_IDS'}="
+            f"{'TRANSLATE_IDS' if APP_MODE == 'translate' else ('ADAPT_IDS' if APP_MODE == 'adapt' else 'REWRITE_IDS')}="
             f"{','.join(map(str, sorted(set(failed_ids))))}"
         )
+    if APP_MODE == "adapt":
+        exclude_line = format_adapt_exclude_line(
+            manual_ids, failed_ids, invalid_servings_ids, skipped_exists_ids,
+        )
+        if exclude_line:
+            LOGGER.info(f"Для исключения при следующем запуске:\n{exclude_line}")
 
     return 2 if failed_ids else 0
 
