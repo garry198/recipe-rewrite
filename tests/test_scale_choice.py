@@ -1,6 +1,7 @@
 """Тесты выбора целевого числа порций choose_target_servings без БД, API и .env.
 Запуск: python tests/test_scale_choice.py [путь_к_скрипту]
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ SCRIPT = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "rewr-transl.py"
 
 src = SCRIPT.read_text(encoding="utf-8")
 ns: dict[str, Any] = {
+    "os": os,
     "re": re,
     "Sequence": Sequence,
     "RESCALE_TARGET_SERVINGS": 4,
