@@ -6,8 +6,8 @@
 ## Общая БД (MariaDB)
 | Таблица | Кто пишет | Кто читает |
 |---|---|---|
-| `recipes3` | recipe-ingest (в коде этого репозитория не подтверждено: неизвестно) | в коде `rewr-transl.py` **не читается** (перенос `recipes3` → `recipe_rewrite` делает внешний процесс владельца, его нет в этом репозитории — неизвестно, уточнит владелец) |
-| `recipe_rewrite` | **rewrite (этот проект)** (`rewr-transl.py`: `UPDATE` в режиме `rewrite`, `INSERT ... ON DUPLICATE KEY UPDATE` в режиме `translate`) | **rewrite (`rewr-transl.py`)**; cost-nutrients, Book Pipeline — неизвестно по коду этого репозитория |
+| `recipes3` | recipe-ingest (в коде этого репозитория не подтверждено: неизвестно) | **rewrite (`rewr-transl.py`, режим `adapt`)**; перенос в `recipe_rewrite` без ИИ-рерайта (если есть) делает внешний процесс владельца — неизвестно |
+| `recipe_rewrite` | **rewrite (этот проект)** (`rewr-transl.py`: `INSERT` / `ON DUPLICATE KEY UPDATE` в режиме `adapt`, `UPDATE` в режиме `rewrite`, `INSERT ... ON DUPLICATE KEY UPDATE` в режиме `translate`) | **rewrite (`rewr-transl.py`)**; cost-nutrients, Book Pipeline — неизвестно по коду этого репозитория |
 | `price_history` | в этом репозитории не пишется (cost-nutrients — неизвестно) | в этом репозитории не читается (Book Pipeline — неизвестно) |
 
 Подтверждённые факты по `recipe_rewrite` (подробнее в [DB_SCHEMA.md](DB_SCHEMA.md)):
@@ -24,6 +24,7 @@
 4. Инструкции: обычный текст, абзац на шаг, пустая строка между шагами, без нумерации (Book Pipeline сам нумерует
    — ПРОВЕРИТЬ; его промпт пересчёта порций v4.1 ожидает нумерованные шаги, возможный конфликт форматов).
 5. Нет КБЖУ в тексте (считает cost-nutrients).
+6. В режиме `adapt` (`recipes3` → `recipe_rewrite`): `INSERT INTO recipe_rewrite` с ключом `(recipe_id, market, locale, variant_type)` (`variant_type='rewrite'`, `market='US'`, `locale='en_US'`, `status=ADAPT_STATUS` ∈ `{draft, active, archived}`, `currency='USD'`); поля КБЖУ, `dish_cost_local`, `nutrients_recalc_version`, `needs_reprice`, `dish_cost_serves` остаются `NULL`/`DEFAULT` (их считает `cost-nutrients`).
 
 ## Чего rewrite не делает
 Не считает цены и КБЖУ, не пересчитывает порции для книги (это Book Pipeline), не парсит сайты (recipe-ingest).
