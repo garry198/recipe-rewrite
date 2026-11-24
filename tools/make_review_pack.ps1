@@ -7,6 +7,7 @@ git diff main...HEAD --stat           | Out-File "$out\stat.txt" -Encoding utf8
 git diff main...HEAD -U3 -- . ':!*.csv' ':!logs' | Out-File "$out\diff.patch" -Encoding utf8
 git log main..HEAD --format="%h %s" | Out-File "$out\commits.txt" -Encoding utf8
 python tests\test_regressions.py 2>&1 | Out-File "$out\tests.txt" -Encoding utf8
+python tests\test_units_golden.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding utf8
 python -m py_compile rewr-transl.py checks.py 2>&1 | Out-File "$out\compile.txt" -Encoding utf8
 if (-not (Test-Path "$out\worker_notes.md")) {
 @"
