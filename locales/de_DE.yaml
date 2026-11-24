@@ -95,8 +95,9 @@ cup_grams:
 oven:
   tolerance_f: 12
   convection_offset: 20
+  context_regex: "(?i)\\b(?:oven|bak(?:e|ed|ing)|roast(?:ed|ing)?|preheat(?:ed)?|broil(?:ed|ing)?)\\b"
   template: "{c} °C Ober-/Unterhitze ({c_conv} °C Umluft)"
-  fallback_template: "{c} °C Ober-/Unterhitze ({c_conv} °C Umluft)"
+  fallback_template: "{c} °C"
   entries:
     225: { c: 110 }
     250: { c: 120 }

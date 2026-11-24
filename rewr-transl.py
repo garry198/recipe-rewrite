@@ -600,6 +600,7 @@ class LocaleOven(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tolerance_f: int = Field(ge=0)
     convection_offset: int | None = None
+    context_regex: str | None = None
     template: str
     fallback_template: str = "{c}°C"
     entries: dict[int, OvenEntry]
@@ -657,6 +658,7 @@ _NUTRITION_RE = re.compile(
     rf"({'|'.join(LOCALE.nutrition_headers)}).*$",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_OVEN_CTX_RE = re.compile(LOCALE.oven.context_regex) if LOCALE.oven.context_regex else None
 
 OVEN_MAP = LOCALE.oven.entries
 CUP_GRAMS = LOCALE.cup_grams
@@ -771,18 +773,18 @@ def _f_to_c_parts(f: int) -> tuple[int, str | None, int | None, bool]:
     return c, None, c_conv, False
 
 
-def _format_oven(c_str: str, th: str | None, c_conv_str: str | None, in_table: bool) -> str:
-    if in_table and (th is not None or "{th}" not in LOCALE.oven.template):
+def _format_oven(c_str: str, th: str | None, c_conv_str: str | None, in_table: bool, is_oven_ctx: bool = True) -> str:
+    if is_oven_ctx and in_table and (th is not None or "{th}" not in LOCALE.oven.template):
         return LOCALE.oven.template.format(c=c_str, th=th or "", c_conv=c_conv_str or "")
     return LOCALE.oven.fallback_template.format(c=c_str, th=th or "", c_conv=c_conv_str or "")
 
 
-def _f_to_c(f: int) -> str:
+def _f_to_c(f: int, is_oven_ctx: bool = True) -> str:
     c, th, c_conv, in_table = _f_to_c_parts(f)
-    return _format_oven(str(c), th, str(c_conv) if c_conv is not None else None, in_table)
+    return _format_oven(str(c), th, str(c_conv) if c_conv is not None else None, in_table, is_oven_ctx)
 
 
-def _convert_temp(m: re.Match) -> str:
+def _convert_temp(m: re.Match, is_oven_ctx: bool = True) -> str:
     a, b = int(m.group("a")), m.group("b")
     if b:
         sep = LOCALE.number_format.range_sep
@@ -790,8 +792,8 @@ def _convert_temp(m: re.Match) -> str:
         cb, th_b, cb_conv, in_b = _f_to_c_parts(int(b))
         c_range = f"{ca}{sep}{cb}"
         c_conv_range = f"{ca_conv}{sep}{cb_conv}" if (ca_conv is not None and cb_conv is not None) else None
-        return _format_oven(c_range, th_b, c_conv_range, in_a or in_b)
-    return _f_to_c(a)
+        return _format_oven(c_range, th_b, c_conv_range, in_a or in_b, is_oven_ctx)
+    return _f_to_c(a, is_oven_ctx)
 
 
 def _stash(mapping: dict, kind: str, value: str) -> str:
@@ -807,7 +809,8 @@ def protect_units(text: str, mapping: dict) -> str:
         text = text.replace(k, f" {v}")
     out = []
     for line in text.splitlines():
-        line = TEMP_RE.sub(lambda m: _stash(mapping, "T", _convert_temp(m)), line)
+        is_oven_ctx = (_OVEN_CTX_RE is None) or bool(_OVEN_CTX_RE.search(line))
+        line = TEMP_RE.sub(lambda m, ctx=is_oven_ctx: _stash(mapping, "T", _convert_temp(m, ctx)), line)
 
         def q(m, line=line):
             tail = re.split(r"[,;(]", line[m.end(): m.end() + 40])[0].lower()

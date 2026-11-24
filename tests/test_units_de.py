@@ -61,7 +61,9 @@ CASES = [
     ("Preheat oven to 400°F (205°C).", "Preheat oven to 200 °C Ober-/Unterhitze (180 °C Umluft)."),
     ("Bake at 350-375°F.", "Bake at 180–190 °C Ober-/Unterhitze (160–170 °C Umluft)."),
     ("Roast at 325 to 350°F.", "Roast at 160–180 °C Ober-/Unterhitze (140–160 °C Umluft)."),
-    ("Warm to 190°F.", "Warm to 88 °C Ober-/Unterhitze (68 °C Umluft)."),
+    ("Warm to 190°F.", "Warm to 88 °C."),
+    ("Cook until the internal temperature reaches 165°F.", "Cook until the internal temperature reaches 74 °C."),
+    ("Heat the oil to 350°F.", "Heat the oil to 180 °C."),
     ("½ cup blueberries", "75 g blueberries"),
 ]
 
