@@ -52,6 +52,7 @@ ns["EXPECTED_CSV_HEADER"] = [
 exec(src[src.index("class RewrittenRecipe"): src.index("class SessionCostTracker")], ns)
 exec(src[src.index("def append_csv_batch"): src.index("def parse_rewrite_ids")], ns)
 exec(src[src.index("def normalize_servings"): src.index("def target_servings_for")], ns)
+exec(src[src.index("def format_adapt_exclude_line"): src.index("def main()")], ns)
 
 build_adapt_select = ns["build_adapt_select"]
 build_adapt_insert_sql = ns["build_adapt_insert_sql"]
@@ -62,6 +63,7 @@ save_adapted_recipe = ns["save_adapted_recipe"]
 append_csv_batch = ns["append_csv_batch"]
 append_ids_file = ns["append_ids_file"]
 normalize_servings = ns["normalize_servings"]
+format_adapt_exclude_line = ns["format_adapt_exclude_line"]
 RewrittenRecipe = ns["RewrittenRecipe"]
 
 fails: list[str] = []
@@ -91,7 +93,18 @@ check("select force=True drops w.id IS NULL", "w.id IS NULL" not in sql and "r.i
 check("select force=True params order", params == ("US", "en_US", 5, "bread", 3), repr(params))
 
 sql, params = build_adapt_select("US", "en_US", 2, force=True)
-check("select force=True without filters", "WHERE" not in sql and params == ("US", "en_US", 2), repr(params))
+check("select force=True without filters has serves filter",
+      "r.serves IS NOT NULL AND r.serves > 0" in sql and "w.id IS NULL" not in sql and params == ("US", "en_US", 2),
+      repr(params))
+
+sql, params = build_adapt_select("US", "en_US", 5, recipe_ids=[1, 2], exclude_ids=[10, 20], dish_types=["dessert"])
+check("select with exclude_ids SQL and params order",
+      "r.serves IS NOT NULL AND r.serves > 0" in sql
+      and "r.id IN (?, ?)" in sql
+      and "r.id NOT IN (?, ?)" in sql
+      and "r.dish_type IN (?)" in sql
+      and params == ("US", "en_US", 1, 2, 10, 20, "dessert", 5),
+      repr(params))
 
 # 2. INSERT SQL (adapt, rewrite, translate)
 ins_sql = build_adapt_insert_sql(force=False)
@@ -100,15 +113,17 @@ vals_part = ins_sql.split("VALUES", 1)[1].split("(", 1)[1].split(")", 1)[0]
 cols = [c.strip() for c in cols_part.split(",")]
 vals = [v.strip() for v in vals_part.split(",")]
 check("INSERT cols == vals count", len(cols) == len(vals) == 16, f"{len(cols)} vs {len(vals)}")
-check("INSERT has needs_reprice and dish_cost_serves", "needs_reprice" in cols and "dish_cost_serves" in cols)
+check("INSERT has needs_reprice and dish_cost_serves, no LAST_INSERT_ID",
+      "needs_reprice" in cols and "dish_cost_serves" in cols and "LAST_INSERT_ID" not in ins_sql)
 forbidden = {"calories_per_person", "proteins_per_person", "fats_per_person", "carbohydrates_per_person",
              "netcarbs_per_person", "dish_cost_local", "nutrients_recalc_version"}
 check("INSERT excludes nutrition/cost cols", forbidden.isdisjoint(set(cols)))
 
 force_sql = build_adapt_insert_sql(force=True)
 check(
-    "INSERT force=True resets nutrition/cost/version and sets needs_reprice/dish_cost_serves",
+    "INSERT force=True has LAST_INSERT_ID, resets nutrition/cost/version and sets needs_reprice/dish_cost_serves",
     "ON DUPLICATE KEY UPDATE" in force_sql
+    and "id = LAST_INSERT_ID(id)" in force_sql
     and "updated_at = NOW()" in force_sql
     and "dish_cost_serves = VALUES(dish_cost_serves)" in force_sql
     and "needs_reprice = 1" in force_sql
@@ -124,8 +139,9 @@ check(
 
 tr_sql = build_translate_insert_sql()
 check(
-    "translate INSERT/UPDATE has needs_reprice and dish_cost_serves, no dish_cost_local",
-    "needs_reprice" in tr_sql and "dish_cost_serves" in tr_sql
+    "translate INSERT/UPDATE has LAST_INSERT_ID, needs_reprice and dish_cost_serves, no dish_cost_local",
+    "id = LAST_INSERT_ID(id)" in tr_sql
+    and "needs_reprice" in tr_sql and "dish_cost_serves" in tr_sql
     and "needs_reprice = 1" in tr_sql and "dish_cost_serves = VALUES(dish_cost_serves)" in tr_sql
     and "dish_cost_local" not in tr_sql,
 )
@@ -146,6 +162,18 @@ try:
 except ValueError:
     bad_limit = True
 check("validate_adapt_config rejects limit <= 0", bad_limit)
+
+force_no_ids_msg = ""
+try:
+    validate_adapt_config("active", 10, force=True, adapt_ids=())
+except ValueError as exc:
+    force_no_ids_msg = str(exc)
+check("validate_adapt_config rejects FORCE without ADAPT_IDS", "ADAPT_FORCE=1 требует явный ADAPT_IDS" in force_no_ids_msg, force_no_ids_msg)
+validate_adapt_config("active", 10, force=True, adapt_ids=[1])
+
+check("format_adapt_exclude_line empty returns None", format_adapt_exclude_line([], [], [], []) is None)
+check("format_adapt_exclude_line formats sorted unique ids",
+      format_adapt_exclude_line([9, 2], [5], [2, 1], [5, 7]) == "ADAPT_EXCLUDE_IDS=1,2,5,7,9")
 
 
 # 4. Fake cursor: duplicate skip, success lastrowid, DRY_RUN & no serves CSV
