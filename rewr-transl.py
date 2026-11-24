@@ -104,7 +104,7 @@ STRICT_REWRITE_CHECKS = os.getenv("STRICT_REWRITE_CHECKS", "1") == "1"
 HARD_FORM = {"mince"}  # «minced garlic» в списке, а в методе целые зубчики — строгая проверка
 HARD_PREP = {"drain", "squeez", "peel", "husk", "trim", "seed", "thaw"}  # 'soften'/'rinse' не строгие (много ложных)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-GEMINI_ACCOUNT_LABEL = os.getenv("GEMINI_ACCOUNT_LABEL", "default").strip() or "default"
+GEMINI_ACCOUNT_LABEL = os.getenv("GEMINI_ACCOUNT_LABEL", "main").strip() or "main"
 THINKING_LEVEL = os.getenv("THINKING_LEVEL", "low").lower()
 CACHE_TTL_DAYS = int(os.getenv("CACHE_TTL_DAYS", "30"))
 
@@ -966,7 +966,7 @@ class SessionCostTracker:
         dry_run: bool,
         run_ts: str,
     ) -> None:
-        self.account_label = account_label or "default"
+        self.account_label = account_label or "main"
         self.key_fp = key_fp
         self.run_hash = run_hash
         self.app_mode = app_mode

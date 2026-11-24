@@ -22,7 +22,7 @@
 - r07 — выбор целевого числа порций без дробных яиц (`choose_target_servings`, `SCALE_VERSION s21` — сброс кэша) (**слита** в `main`)
 - r08 — пропуск рецептов со ссылкой на другой рецепт (`SKIP_RECIPE_REFS=1`, `has_recipe_ref`) (**слита** в `main`)
 - r09 — переделка рерайтов с потерянными количествами: backup, `rollback_force.py`, отчёт `force_report` (**слита** в `main`)
-- r10 — учёт аккаунта и контекста запуска в `api_usage.csv` (`GEMINI_ACCOUNT_LABEL`, `key_fp`, `api_usage_report.py`)
+- r10 — учёт аккаунта и контекста запуска в `api_usage.csv` (`GEMINI_ACCOUNT_LABEL`, дефолт `"main"` — согласовано с `cost-nutrients (q41.8)` и `Book Pipeline`, `key_fp`, `api_usage_report.py`; `r10` **слита**, `r10.7` в `worker/r10b`)
 - r11 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
 - r12 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 

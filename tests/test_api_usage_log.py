@@ -27,7 +27,7 @@ ns: dict[str, Any] = {
     "Sequence": Sequence,
     "datetime": datetime,
     "BASE_DIR": HERE,
-    "GEMINI_ACCOUNT_LABEL": "default",
+    "GEMINI_ACCOUNT_LABEL": "main",
     "APP_MODE": "adapt",
     "DRY_RUN": False,
     "LOGGER": _test_logger,
@@ -65,6 +65,9 @@ with tempfile.TemporaryDirectory() as tmp:
         w.writerow(["2026-11-20T10:00:00", "gemini-3.8-flash", 1000, 0, 200, 50, 0, 1250, 250, "0.001688", 0.75, 3.75, 1])
 
     tracker = ns["SessionCostTracker"]()
+    check("SessionCostTracker default account_label is 'main'", tracker.account_label == "main")
+    tracker.set_run_context("", ns["api_key_fingerprint"](fake_key), "abcd1234", "adapt", False, "20261124_164000")
+    check("set_run_context empty label falls back to 'main'", tracker.account_label == "main")
     tracker.USAGE_LOG = usage_csv
     tracker.set_run_context("backup", ns["api_key_fingerprint"](fake_key), "abcd1234", "adapt", False, "20261124_164000")
 
@@ -109,6 +112,16 @@ with tempfile.TemporaryDirectory() as tmp:
     by_day = rep.aggregate_usage(since_rows, by="day")
     check("report --since filters out older legacy rows",
           len(since_rows) == 1 and len(by_day) == 1)
+
+    # 3. Строка нового формата с пустой account_label остаётся "legacy", не "main"
+    with usage_csv.open("a", encoding="utf-8-sig", newline="") as fh:
+        csv.writer(fh, delimiter=";").writerow([
+            "2026-11-24T18:00:00", "gemini-3.8-flash", 100, 0, 50, 0, 0, 150, 50, "0.000263", 0.75, 3.75, 1,
+            "", expected_fp, "abcd1234", "adapt", "1240", 0, "20261124_180000",
+        ])
+    by_acct2 = rep.aggregate_usage(rep.load_usage_rows(usage_csv), by="account")
+    check("empty account_label maps to 'legacy', not 'main'",
+          "main" not in by_acct2 and by_acct2["legacy"]["requests"] == 2)
 
 print(f"\nИТОГО api_usage_log: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)
