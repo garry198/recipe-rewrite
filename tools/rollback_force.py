@@ -13,13 +13,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import mariadb
-from dotenv import load_dotenv
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-def get_db_connection() -> mariadb.Connection:
+def get_db_connection() -> Any:
+    import mariadb
+    from dotenv import load_dotenv
+
     load_dotenv(BASE_DIR / ".env")
     return mariadb.connect(
         host=os.getenv("DB_HOST", "localhost"),
