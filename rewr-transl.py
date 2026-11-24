@@ -106,6 +106,7 @@ else:
     SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "prompts/desserts_rewrite_prompt_v3_5.txt")
 
 CSV_LOG_FILE = BASE_DIR / os.getenv("CSV_LOG_FILE", "rewrite_update_log.csv")
+IDS_OUT_DIR = BASE_DIR / os.getenv("IDS_OUT_DIR", "logs")
 CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -1029,6 +1030,16 @@ def append_csv_batch(filepath: Path, batch_data: list[tuple[dict, RewrittenRecip
         writer.writerows(rows_to_write)
 
 
+def append_ids_file(filepath: Path, row_ids: Sequence[int]) -> int:
+    if not row_ids:
+        return 0
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    payload = "\n".join(str(int(rid)) for rid in row_ids) + "\n"
+    with filepath.open(mode="a", encoding="utf-8", newline="\n") as f:
+        f.write(payload)
+    return len(row_ids)
+
+
 def parse_rewrite_ids(raw: str) -> list[int]:
     if not raw:
         return []
@@ -1177,9 +1188,9 @@ def build_adapt_insert_sql(force: bool = False) -> str:
         INSERT INTO recipe_rewrite (
             recipe_id, market, locale, variant_type, status,
             dish_name_variant, ingredients_list_variant, cooking_instructions_variant,
-            instructions_hash, serves, prep_time_minutes, cook_time_minutes,
-            currency, ai_model
-        ) VALUES (?, ?, ?, 'rewrite', ?, ?, ?, ?, ?, ?, ?, ?, 'USD', ?)
+            instructions_hash, serves, dish_cost_serves, needs_reprice,
+            prep_time_minutes, cook_time_minutes, currency, ai_model
+        ) VALUES (?, ?, ?, 'rewrite', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'USD', ?)
     """
     if not force:
         return base.strip()
@@ -1193,6 +1204,15 @@ def build_adapt_insert_sql(force: bool = False) -> str:
             cooking_instructions_variant = VALUES(cooking_instructions_variant),
             instructions_hash = VALUES(instructions_hash),
             serves = VALUES(serves),
+            dish_cost_serves = VALUES(dish_cost_serves),
+            needs_reprice = 1,
+            calories_per_person = NULL,
+            proteins_per_person = NULL,
+            fats_per_person = NULL,
+            carbohydrates_per_person = NULL,
+            netcarbs_per_person = NULL,
+            dish_cost_local = NULL,
+            nutrients_recalc_version = NULL,
             prep_time_minutes = VALUES(prep_time_minutes),
             cook_time_minutes = VALUES(cook_time_minutes),
             currency = VALUES(currency),
@@ -1224,6 +1244,7 @@ def save_adapted_recipe(
         data.cooking_instructions,
         instructions_hash,
         data.servings,
+        data.servings,
         source_row.get("prep_time_minutes"),
         source_row.get("cook_time_minutes"),
         ai_model,
@@ -1241,54 +1262,66 @@ def save_adapted_recipe(
         cursor.close()
 
 
+def build_rewrite_update_sql() -> str:
+    return """
+        UPDATE recipe_rewrite SET ingredients_list_variant = ?, cooking_instructions_variant = ?,
+        instructions_hash = ?, serves = ?, dish_cost_serves = ?, needs_reprice = 1,
+        ai_model = ?, updated_at = NOW()
+        WHERE id = ?
+    """.strip()
+
+
+def build_translate_insert_sql() -> str:
+    return """
+        INSERT INTO recipe_rewrite (
+            recipe_id, market, locale, variant_type, dish_name_variant, ingredients_list_variant,
+            cooking_instructions_variant, instructions_hash, serves, dish_cost_serves, needs_reprice,
+            prep_time_minutes, cook_time_minutes, currency,
+            calories_per_person, proteins_per_person, fats_per_person,
+            carbohydrates_per_person, netcarbs_per_person,
+            ai_model, created_at, updated_at
+        )
+        SELECT
+            recipe_id, ?, ?, variant_type, ?, ?, ?, ?,
+            serves, serves, 1, prep_time_minutes, cook_time_minutes, ?,
+            calories_per_person, proteins_per_person, fats_per_person,
+            carbohydrates_per_person, netcarbs_per_person,
+            ?, NOW(), NOW()
+        FROM recipe_rewrite
+        WHERE id = ?
+        ON DUPLICATE KEY UPDATE
+            dish_name_variant = VALUES(dish_name_variant),
+            ingredients_list_variant = VALUES(ingredients_list_variant),
+            cooking_instructions_variant = VALUES(cooking_instructions_variant),
+            instructions_hash = VALUES(instructions_hash),
+            dish_cost_serves = VALUES(dish_cost_serves),
+            needs_reprice = 1,
+            currency = VALUES(currency),
+            ai_model = VALUES(ai_model),
+            updated_at = NOW()
+    """.strip()
+
+
 def save_rewritten_recipe(connection: mariadb.Connection, source_row_id: int, data: RewrittenRecipe,
-                          ai_model: str) -> None:
+                          ai_model: str) -> int | None:
     instructions_hash = hashlib.sha256(data.cooking_instructions.encode("utf-8")).hexdigest()
     cursor = connection.cursor()
     try:
         if APP_MODE == "rewrite":
-            sql = """
-                UPDATE recipe_rewrite SET ingredients_list_variant = ?, cooking_instructions_variant = ?,
-                instructions_hash = ?, serves = ?, ai_model = ?, updated_at = NOW()
-                WHERE id = ?
-            """
-            cursor.execute(sql, (
+            cursor.execute(build_rewrite_update_sql(), (
                 data.ingredients_list, data.cooking_instructions, instructions_hash, data.servings,
-                ai_model, source_row_id,
+                data.servings, ai_model, source_row_id,
             ))
+            return source_row_id
 
         elif APP_MODE == "translate":
-            sql = """
-                INSERT INTO recipe_rewrite (
-                    recipe_id, market, locale, variant_type, dish_name_variant, ingredients_list_variant,
-                    cooking_instructions_variant, instructions_hash, serves,
-                    prep_time_minutes, cook_time_minutes, currency,
-                    calories_per_person, proteins_per_person, fats_per_person,
-                    carbohydrates_per_person, netcarbs_per_person,
-                    ai_model, created_at, updated_at
-                )
-                SELECT
-                    recipe_id, ?, ?, variant_type, ?, ?, ?, ?,
-                    serves, prep_time_minutes, cook_time_minutes, ?,
-                    calories_per_person, proteins_per_person, fats_per_person,
-                    carbohydrates_per_person, netcarbs_per_person,
-                    ?, NOW(), NOW()
-                FROM recipe_rewrite
-                WHERE id = ?
-                ON DUPLICATE KEY UPDATE
-                    dish_name_variant = VALUES(dish_name_variant),
-                    ingredients_list_variant = VALUES(ingredients_list_variant),
-                    cooking_instructions_variant = VALUES(cooking_instructions_variant),
-                    instructions_hash = VALUES(instructions_hash),
-                    currency = VALUES(currency),
-                    ai_model = VALUES(ai_model),
-                    updated_at = NOW()
-            """
-            cursor.execute(sql, (
+            cursor.execute(build_translate_insert_sql(), (
                 TARGET_MARKET, TARGET_LOCALE, data.dish_name, data.ingredients_list, data.cooking_instructions,
                 instructions_hash, TARGET_CURRENCY,
                 ai_model, source_row_id,
             ))
+            return getattr(cursor, "lastrowid", None)
+        return None
     finally:
         cursor.close()
 
@@ -1643,6 +1676,8 @@ def main() -> int:
 
     failed_ids, missing_in_db, invalid_servings_ids, manual_ids = [], [], [], []
     missing_qty_ids: list[int] = []
+    ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    total_saved_ids = 0
 
     if APP_MODE == "adapt":
         adapt_rows = fetch_adapt_rows(
@@ -1935,6 +1970,7 @@ def main() -> int:
                         result_by_id[item.rewrite_row_id] = item
 
                 csv_buffer: list[tuple[dict, RewrittenRecipe | None, int | None, str]] = []
+                batch_saved_ids: list[int] = []
                 for rid in eligible_ids:
                     rewritten = result_by_id.get(rid)
                     if not rewritten:
@@ -1951,12 +1987,15 @@ def main() -> int:
                                 connection, rows_by_id[rid], rewritten, GEMINI_MODEL,
                                 ADAPT_MARKET, ADAPT_LOCALE, ADAPT_STATUS, force=ADAPT_FORCE,
                             )
+                            if save_status == "OK" and saved_id:
+                                batch_saved_ids.append(int(saved_id))
                         else:
-                            save_rewritten_recipe(
+                            saved_id = save_rewritten_recipe(
                                 connection, int(rows_by_id[rid]["rewrite_row_id"]), rewritten, GEMINI_MODEL,
                             )
-                            saved_id = int(rows_by_id[rid]["rewrite_row_id"])
                             save_status = "OK"
+                            if saved_id:
+                                batch_saved_ids.append(int(saved_id))
                     else:
                         saved_id = None if APP_MODE == "adapt" else int(rows_by_id[rid]["rewrite_row_id"])
                         save_status = "DRY_RUN"
@@ -1965,6 +2004,7 @@ def main() -> int:
 
                 if not DRY_RUN:
                     connection.commit()
+                    total_saved_ids += append_ids_file(ids_out_file, batch_saved_ids)
 
                 try:
                     append_csv_batch(CSV_LOG_FILE, csv_buffer)
@@ -2015,6 +2055,8 @@ def main() -> int:
         else:
             LOGGER.info("=== РАСХОДЫ НА API (СЕАНС) ===")
             LOGGER.info("Все данные взяты из кэша. Запросов к API не было. Потрачено: $0.0000 USD")
+        if not DRY_RUN and total_saved_ids > 0:
+            LOGGER.info(f"Файл ID для cost-nutrients: {ids_out_file} ({total_saved_ids} ID)")
 
     if missing_in_db:
         LOGGER.warning(f"Пропущено (нет в БД): {len(missing_in_db)} ID")
