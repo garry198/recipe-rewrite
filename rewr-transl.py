@@ -8,7 +8,9 @@ strip_recipe_refs, form_check, style_check из checks.py (c4+).
 from __future__ import annotations
 
 import csv
+import difflib
 import hashlib
+import json
 import logging
 import math
 import os
@@ -16,7 +18,8 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Sequence
@@ -116,6 +119,7 @@ else:
 
 CSV_LOG_FILE = BASE_DIR / os.getenv("CSV_LOG_FILE", "rewrite_update_log.csv")
 IDS_OUT_DIR = BASE_DIR / os.getenv("IDS_OUT_DIR", "logs")
+BACKUPS_DIR = BASE_DIR / os.getenv("BACKUPS_DIR", "backups")
 CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -1207,6 +1211,228 @@ def fetch_adapt_rows(
         cursor.close()
 
 
+def _json_default(val: Any) -> Any:
+    if isinstance(val, (datetime, date)):
+        return val.isoformat()
+    if isinstance(val, Decimal):
+        return str(val)
+    if isinstance(val, (bytes, bytearray)):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
+def fetch_recipe_rewrite_for_backup(
+    connection: mariadb.Connection,
+    recipe_ids: Sequence[int],
+    market: str,
+    locale: str,
+    variant_type: str = "rewrite",
+) -> list[dict[str, Any]]:
+    if not recipe_ids:
+        return []
+    placeholders = ", ".join("?" for _ in recipe_ids)
+    sql = (
+        f"SELECT * FROM recipe_rewrite "
+        f"WHERE recipe_id IN ({placeholders}) AND market = ? AND locale = ? AND variant_type = ? "
+        f"ORDER BY id"
+    )
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute(sql, tuple(recipe_ids) + (market, locale, variant_type))
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+
+
+def fetch_used_before_map(connection: mariadb.Connection, recipe_ids: Sequence[int]) -> dict[int, int]:
+    if not recipe_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in recipe_ids)
+    sql = f"SELECT id, used_before FROM recipes3 WHERE id IN ({placeholders})"
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute(sql, tuple(recipe_ids))
+        return {int(r["id"]): int(r.get("used_before") or 0) for r in cursor.fetchall()}
+    except mariadb.Error as exc:
+        LOGGER.warning(f"Не удалось прочитать used_before из recipes3 (использую пустое значение): {exc}")
+        return {}
+    finally:
+        cursor.close()
+
+
+def create_force_backup(
+    connection: mariadb.Connection,
+    recipe_ids: Sequence[int],
+    market: str,
+    locale: str,
+    backups_dir: Path,
+    ts: str,
+    variant_type: str = "rewrite",
+) -> tuple[Path, Path, dict[int, dict[str, Any]]]:
+    rows = fetch_recipe_rewrite_for_backup(connection, recipe_ids, market, locale, variant_type)
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = backups_dir / f"recipe_rewrite_force_{ts}.jsonl"
+    meta_path = backups_dir / f"recipe_rewrite_force_{ts}.meta.json"
+
+    with jsonl_path.open("w", encoding="utf-8", newline="\n") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False, default=_json_default) + "\n")
+
+    rw_ids = [int(r["id"]) for r in rows if r.get("id") is not None]
+    meta = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "market": market,
+        "locale": locale,
+        "variant_type": variant_type,
+        "recipe_ids": [int(x) for x in recipe_ids],
+        "recipe_rewrite_ids": rw_ids,
+        "row_count": len(rows),
+        "touched_ids": [],
+        "inserted_ids": [],
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    before_by_recipe = {int(r["recipe_id"]): r for r in rows if r.get("recipe_id") is not None}
+    return jsonl_path, meta_path, before_by_recipe
+
+
+def update_force_backup_meta(meta_path: Path, touched_ids: Sequence[int], inserted_ids: Sequence[int]) -> None:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["touched_ids"] = sorted({int(x) for x in touched_ids})
+    meta["inserted_ids"] = sorted({int(x) for x in inserted_ids})
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_force_report(
+    report_dir: Path,
+    ts: str,
+    entries: Sequence[dict[str, Any]],
+    skipped_summary: dict[int, str],
+    dry_run: bool,
+) -> tuple[Path, Path]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    md_path = report_dir / f"force_report_{ts}.md"
+    csv_path = report_dir / f"force_report_{ts}.csv"
+
+    servings_changed = [
+        e for e in entries if e.get("serves_before") != e.get("serves_after")
+    ]
+    used_entries = [e for e in entries if (e.get("used_before") or 0) > 0]
+
+    md_lines = [
+        f"# Force report ({'DRY_RUN' if dry_run else 'LIVE'}) — {ts}",
+        "",
+        "## Сводка",
+        f"- Режим: **{'DRY_RUN (без записи в БД)' if dry_run else 'LIVE'}**",
+        f"- Обработано: {len(entries)}",
+        f"- Пропущено: {len(skipped_summary)}",
+        f"- Изменились порции (`serves`): {len(servings_changed)} "
+        + (
+            "(" + ", ".join(f"{e['recipe_id']}: {e['serves_before']}->{e['serves_after']}" for e in servings_changed) + ")"
+            if servings_changed else ""
+        ),
+        f"- Использованы в книгах (`used_before > 0`): "
+        + (", ".join(str(e["recipe_id"]) for e in used_entries) if used_entries else "нет"),
+        "",
+    ]
+    if skipped_summary:
+        md_lines.append("### Пропущенные")
+        for rid, reason in sorted(skipped_summary.items()):
+            md_lines.append(f"- `recipes3.id={rid}`: {reason}")
+        md_lines.append("")
+
+    md_lines.append("## Детали")
+    for e in entries:
+        used_val = e.get("used_before")
+        book_tag = " — **ИСПОЛЬЗОВАН В КНИГЕ**" if (used_val or 0) > 0 else ""
+        md_lines.append(f"### recipes3.id={e['recipe_id']} (recipe_rewrite.id={e.get('rewrite_id') or '-'}){book_tag}")
+        md_lines.append(f"- `used_before`: {used_val if used_val is not None else ''}")
+        md_lines.append(f"- `dish_name`: `{e.get('dish_name_before', '')}` -> `{e.get('dish_name_after', '')}`")
+        md_lines.append(f"- `serves`: `{e.get('serves_before')}` -> `{e.get('serves_after')}`")
+        diff_lines = list(
+            difflib.unified_diff(
+                (e.get("ingredients_before") or "").splitlines(),
+                (e.get("ingredients_after") or "").splitlines(),
+                fromfile="before",
+                tofile="after",
+                lineterm="",
+            )
+        )
+        md_lines.append("```diff")
+        md_lines.extend(diff_lines if diff_lines else ["(ингредиенты без изменений)"])
+        md_lines.append("```")
+        md_lines.append("")
+
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+
+    csv_headers = [
+        "recipe_id", "recipe_rewrite_id", "used_before", "book_flag",
+        "dish_name_before", "dish_name_after", "serves_before", "serves_after",
+        "ingredients_before", "ingredients_after",
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.writer(fh, delimiter=";")
+        w.writerow(csv_headers)
+        for e in entries:
+            used_val = e.get("used_before")
+            w.writerow([
+                e["recipe_id"],
+                e.get("rewrite_id") if e.get("rewrite_id") is not None else "",
+                used_val if used_val is not None else "",
+                "ИСПОЛЬЗОВАН В КНИГЕ" if (used_val or 0) > 0 else "",
+                e.get("dish_name_before", ""),
+                e.get("dish_name_after", ""),
+                e.get("serves_before") if e.get("serves_before") is not None else "",
+                e.get("serves_after") if e.get("serves_after") is not None else "",
+                e.get("ingredients_before", ""),
+                e.get("ingredients_after", ""),
+            ])
+
+    return md_path, csv_path
+
+
+def summarize_adapt_unprocessed(
+    adapt_ids: Sequence[int],
+    processed_ids: Sequence[int],
+    exclude_ids: Sequence[int],
+    invalid_servings_ids: Sequence[int],
+    manual_ids: Sequence[int],
+    missing_qty_ids: Sequence[int],
+    recipe_ref_ids: Sequence[int],
+    failed_ids: Sequence[int],
+    db_found_ids: Sequence[int],
+) -> dict[int, str]:
+    processed_set = set(processed_ids)
+    exclude_set = set(exclude_ids)
+    invalid_set = set(invalid_servings_ids)
+    manual_set = set(manual_ids)
+    missing_qty_set = set(missing_qty_ids)
+    ref_set = set(recipe_ref_ids)
+    failed_set = set(failed_ids)
+    found_set = set(db_found_ids)
+
+    reasons: dict[int, str] = {}
+    for rid in adapt_ids:
+        if rid in processed_set:
+            continue
+        if rid in exclude_set:
+            reasons[rid] = "уже в ADAPT_EXCLUDE_IDS"
+        elif rid in invalid_set:
+            reasons[rid] = "нет serves"
+        elif rid in manual_set:
+            reasons[rid] = "multi-variant"
+        elif rid in missing_qty_set:
+            reasons[rid] = "нет количеств"
+        elif rid in ref_set:
+            reasons[rid] = "ссылка на рецепт"
+        elif rid in failed_set:
+            reasons[rid] = "ошибка/отклонён ИИ"
+        elif rid not in found_set:
+            reasons[rid] = "нет в выборке recipes3 (отсутствует, нет serves или отсеян фильтром)"
+        else:
+            reasons[rid] = "пропущен"
+    return reasons
+
+
 def build_adapt_insert_sql(force: bool = False) -> str:
     base = """
         INSERT INTO recipe_rewrite (
@@ -1816,8 +2042,17 @@ def main() -> int:
     missing_qty_ids: list[int] = []
     recipe_ref_ids: list[int] = []
     skipped_exists_ids: list[int] = []
-    ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{run_ts}.txt"
     total_saved_ids = 0
+    force_meta_path: Path | None = None
+    before_by_recipe: dict[int, dict[str, Any]] = {}
+    used_before_map: dict[int, int] = {}
+    force_report_entries: list[dict[str, Any]] = []
+    touched_rw_ids: list[int] = []
+    inserted_rw_ids: list[int] = []
+    adapt_found_ids: list[int] = []
+    adapt_processed_ids: list[int] = []
 
     if APP_MODE == "adapt":
         adapt_rows = fetch_adapt_rows(
@@ -1830,6 +2065,7 @@ def main() -> int:
             force=ADAPT_FORCE,
             exclude_ids=adapt_exclude_list,
         )
+        adapt_found_ids = [int(r["recipe_id"]) for r in adapt_rows]
         eligible_adapt_rows: list[dict[str, Any]] = []
         skipped_csv: list[tuple[dict, RewrittenRecipe | None, int | None, str]] = []
         for r in adapt_rows:
@@ -1842,6 +2078,23 @@ def main() -> int:
                 eligible_adapt_rows.append(r)
         if skipped_csv:
             append_csv_batch(CSV_LOG_FILE, skipped_csv)
+        if ADAPT_FORCE and adapt_found_ids:
+            used_before_map = fetch_used_before_map(connection, adapt_found_ids)
+            if not DRY_RUN:
+                try:
+                    bkp_jsonl, force_meta_path, before_by_recipe = create_force_backup(
+                        connection, adapt_found_ids, ADAPT_MARKET, ADAPT_LOCALE, BACKUPS_DIR, run_ts,
+                    )
+                    LOGGER.info(f"Резервная копия создана: {bkp_jsonl} ({len(before_by_recipe)} строк)")
+                except OSError as exc:
+                    LOGGER.error(f"Не удалось записать резервную копию до запуска API: {exc}")
+                    connection.close()
+                    return 1
+            else:
+                bkp_rows = fetch_recipe_rewrite_for_backup(
+                    connection, adapt_found_ids, ADAPT_MARKET, ADAPT_LOCALE,
+                )
+                before_by_recipe = {int(r["recipe_id"]): r for r in bkp_rows if r.get("recipe_id") is not None}
         batches_rows: list[list[dict[str, Any]]] = [
             eligible_adapt_rows[i:i + FETCH_SIZE] for i in range(0, len(eligible_adapt_rows), FETCH_SIZE)
         ]
@@ -2142,6 +2395,11 @@ def main() -> int:
                             )
                             if save_status == "OK" and saved_id:
                                 batch_saved_ids.append(int(saved_id))
+                                adapt_processed_ids.append(int(rows_by_id[rid]["recipe_id"]))
+                                if ADAPT_FORCE:
+                                    touched_rw_ids.append(int(saved_id))
+                                    if int(rows_by_id[rid]["recipe_id"]) not in before_by_recipe:
+                                        inserted_rw_ids.append(int(saved_id))
                             elif save_status == "exists, skipped":
                                 skipped_exists_ids.append(int(rows_by_id[rid]["recipe_id"]))
                         else:
@@ -2152,8 +2410,29 @@ def main() -> int:
                             if saved_id:
                                 batch_saved_ids.append(int(saved_id))
                     else:
-                        saved_id = None if APP_MODE == "adapt" else int(rows_by_id[rid]["rewrite_row_id"])
+                        saved_id = (
+                            (before_by_recipe.get(int(rows_by_id[rid]["recipe_id"]), {}).get("id") if ADAPT_FORCE else None)
+                            if APP_MODE == "adapt"
+                            else int(rows_by_id[rid]["rewrite_row_id"])
+                        )
                         save_status = "DRY_RUN"
+                        if APP_MODE == "adapt":
+                            adapt_processed_ids.append(int(rows_by_id[rid]["recipe_id"]))
+
+                    if APP_MODE == "adapt" and ADAPT_FORCE and save_status in ("OK", "DRY_RUN"):
+                        r_id = int(rows_by_id[rid]["recipe_id"])
+                        prev = before_by_recipe.get(r_id, {})
+                        force_report_entries.append({
+                            "recipe_id": r_id,
+                            "rewrite_id": saved_id if saved_id is not None else prev.get("id"),
+                            "used_before": used_before_map.get(r_id),
+                            "dish_name_before": prev.get("dish_name_variant") or rows_by_id[rid].get("dish_name") or "",
+                            "dish_name_after": rows_by_id[rid].get("dish_name") or "",
+                            "serves_before": prev.get("serves") if prev else rows_by_id[rid].get("serves"),
+                            "serves_after": rewritten.servings,
+                            "ingredients_before": prev.get("ingredients_list_variant") or rows_by_id[rid].get("ingredients_list") or "",
+                            "ingredients_after": rewritten.ingredients_list,
+                        })
 
                     csv_buffer.append((rows_by_id[rid], rewritten, saved_id, save_status))
 
@@ -2212,6 +2491,41 @@ def main() -> int:
             LOGGER.info("Все данные взяты из кэша. Запросов к API не было. Потрачено: $0.0000 USD")
         if not DRY_RUN and total_saved_ids > 0:
             LOGGER.info(f"Файл ID для cost-nutrients: {ids_out_file} ({total_saved_ids} ID)")
+        if APP_MODE == "adapt" and ADAPT_FORCE and not DRY_RUN and force_meta_path is not None:
+            update_force_backup_meta(force_meta_path, touched_rw_ids, inserted_rw_ids)
+        if APP_MODE == "adapt" and ADAPT_FORCE:
+            skipped_for_report = summarize_adapt_unprocessed(
+                adapt_ids_list or adapt_found_ids,
+                adapt_processed_ids,
+                adapt_exclude_list,
+                invalid_servings_ids,
+                manual_ids,
+                missing_qty_ids,
+                recipe_ref_ids,
+                failed_ids,
+                adapt_found_ids,
+            )
+            rep_md, rep_csv = write_force_report(
+                IDS_OUT_DIR, run_ts, force_report_entries, skipped_for_report, DRY_RUN,
+            )
+            LOGGER.info(f"Отчёт FORCE: {rep_md} и {rep_csv}")
+        if APP_MODE == "adapt" and adapt_ids_list:
+            unprocessed = summarize_adapt_unprocessed(
+                adapt_ids_list,
+                adapt_processed_ids,
+                adapt_exclude_list,
+                invalid_servings_ids,
+                manual_ids,
+                missing_qty_ids,
+                recipe_ref_ids,
+                failed_ids,
+                adapt_found_ids,
+            )
+            if unprocessed:
+                LOGGER.info(
+                    "Сводка необработанных ADAPT_IDS: "
+                    + "; ".join(f"{k}: {v}" for k, v in sorted(unprocessed.items()))
+                )
 
     if missing_in_db:
         LOGGER.warning(f"Пропущено (нет в БД): {len(missing_in_db)} ID")
