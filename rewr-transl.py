@@ -2051,10 +2051,14 @@ def call_api_with_retries(
     backoff: Sequence[float],
     split_on_fail: bool,
     tracker,
-    sleep_fn=time.sleep,
-    logger=LOGGER,
+    sleep_fn=None,
+    logger=None,
 ) -> list[tuple[list[int], Any]]:
     """Вызов API с повторами при исключении и опциональным разбиением батча на одиночные запросы."""
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if logger is None:
+        logger = LOGGER
     def _row_ids(rows_seq: Sequence[dict[str, Any]]) -> list[int]:
         return [int(r["rewrite_row_id"] if r.get("rewrite_row_id") is not None else r["recipe_id"]) for r in rows_seq]
 
