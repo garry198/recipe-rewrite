@@ -4,7 +4,7 @@ from fractions import Fraction
 
 # Версия самих проверок — участвует в run_hash скрипта, чтобы при изменении
 # логики кэш инвалидировался. Поднимайте при любой правке этого файла.
-CHECKS_VERSION = "c9"
+CHECKS_VERSION = "c10"
 
 
 # ---------- 1. Проверка количеств в ингредиентах (рерайт) ----------
@@ -147,9 +147,13 @@ _PREP_STEMS: dict[str, str] = {
     "soften": r"\bsoft",
     "thaw":   r"\bthaw",
     "rinse":  r"\brins",
-    # 'seeded', 'seeds removed', 'remove the seeds', но НЕ просто 'seeds'
-    # (иначе 'sesame seeds' даст ложное срабатывание).
-    "seed":   r"\bseeded\b|\bseeds? removed\b|\bremov(?:e|ing) (?:the )?seeds?\b|\bde-?seed|\bseed(?:ing)?\s+(?:the|and|each|it|them)\b",
+    # 'seeded', 'seeds removed', 'remove the seeds', 'Peel, seed, and chop', но НЕ просто 'seeds' / 'chia seed'
+    # (иначе 'sesame seeds' / 'chia seed' даст ложное срабатывание).
+    "seed": (
+        r"\bseeded\b|\bseeds? removed\b|\bremov(?:e|ing) (?:the )?seeds?\b|\bde-?seed"
+        r"|\bseed(?:ing)?\s+(?:the|and|each|it|them)\b"
+        r"|(?:^|[.;,]\s*|\band\s+)seed(?:ing)?\s*[,;]"
+    ),
     "husk":   r"\bhusk",
     "trim":   r"\btrim",
     # 'pat dry', 'patted dry', 'pat the X dry', 'blot dry', 'dry the X' и т.д.
