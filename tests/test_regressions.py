@@ -11,7 +11,7 @@ from collections import Counter
 ns = {"re": re, "Fraction": Fraction, "os": os, "Counter": Counter, "math": math}
 exec(src[src.index("_METRIC_LEAD_RE"): src.index("# ================= UNITS_FR")], ns)           # math + merge
 exec(src[src.index("_BRAND_RE ="): src.index("def build_sent_ingredients")], ns)                   # multi-variant, no-qty
-exec("RESCALE_TARGET_SERVINGS=4\nRESCALE_ONLY_IF_MORE_THAN=6\nRESCALE_MAX_DIVISOR=2.5\n"
+exec("RESCALE_TARGET_SERVINGS=4\nRESCALE_ONLY_IF_MORE_THAN=8\nRESCALE_MAX_DIVISOR=2.5\n"
      + src[src.index("def target_servings_for"): src.index("def build_sent_ingredients")], ns)
 exec(src[src.index('AUTO_FIX_PREP ='): src.index("def validate_and_fix_rewrite")], ns)                       # авто-подготовка
 exec(src[src.index("# ================= UNITS_FR"): src.index("# ================= СХЕМЫ ДАННЫХ")], ns)      # units (перевод)
@@ -85,7 +85,7 @@ check("чизкейк (8973) не варианты", len(d("16 oz cream cheese\n
 check("бейглы (4563) — варианты", len(d("1 1/2 cups almond flour\n2 large eggs\n2 1/2 cups mozzarella cheese (must be\n2 oz cream cheese\n1/2 cup coconut flour\n3 large eggs\n2 1/2 cups shredded mozzarella cheese\n2 oz cream cheese")), lambda n: n >= 2)
 # --- порции
 t = ns["target_servings_for"]
-check("порции 12->8, 8->4, 6->6, 20->8", (t(12), t(8), t(6), t(20)), lambda x: x == (8, 4, 6, 8))
+check("порции 12->8, 8->8, 9->4, 6->6, 20->8", (t(12), t(8), t(9), t(6), t(20)), lambda x: x == (8, 8, 4, 6, 8))
 
 def test_target_servings_threshold8():
     _saved = (ns["RESCALE_TARGET_SERVINGS"], ns["RESCALE_ONLY_IF_MORE_THAN"], ns["RESCALE_MAX_DIVISOR"])
