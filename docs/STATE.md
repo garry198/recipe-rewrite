@@ -21,4 +21,6 @@
 - r06 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
 - r07 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
+Процесс: воркер в `worker/rNN` (локальные коммиты) → `make_review_pack.ps1` → приёмка Claude → слияние владельцем через `.\tools\merge_branch.ps1 worker/rNN` (без GitHub PR).
+
 Источник идей для r06–r07: файлы ветки Book Pipeline (читать как референс, не копировать целиком: там US-ориентированные меры).
