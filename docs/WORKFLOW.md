@@ -16,3 +16,6 @@ Claude проверяет не только код, но и: не выросла
 - Теги на значимые состояния: `v22-baseline`, далее `v23`… (совпадают с номером в имени старых скриптов).
 - Стыки с другими пайплайнами описываются в `CONTRACTS.md`; чужой код здесь не хранится, только читается по ссылке.
 - При перезаписи строк через `ADAPT_FORCE=1`: сначала `DRY_RUN=1` + проверка `logs/force_report_<ts>.md`, затем `DRY_RUN=0` (авто-бэкап в `backups/`), затем `cost-nutrients` по файлу ID; откат при необходимости — `tools/rollback_force.py`.
+- **Учёт расходов (`api_usage.csv`)**: к каждой строке добавляются `account_label`, `key_fp` (первые 8 символов SHA-256 ключа, сам ключ никогда не логируется), `run_hash`, `app_mode`, `recipe_ids`, `dry_run`, `run_ts`. При смене заголовка старый файл автоматически переименовывается в `api_usage_legacy_<ts>.csv`.
+  Сводка по аккаунтам: `python tools/api_usage_report.py [--since YYYY-MM-DD] [--by account|day|run_hash]` или в PowerShell:
+  `Import-Csv -Delimiter ';' api_usage.csv | Group-Object account_label | ForEach-Object { [PSCustomObject]@{ account = if ($_.Name) { $_.Name } else { 'legacy' }; requests = $_.Count; cost_usd = ($_.Group | Measure-Object -Property cost_usd -Sum).Sum } }`
