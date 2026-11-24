@@ -1431,6 +1431,7 @@ MULTI_VARIANT_MIN_DUPS = int(os.getenv("MULTI_VARIANT_MIN_DUPS", "2"))  # пос
 SKIP_MULTI_VARIANT = os.getenv("SKIP_MULTI_VARIANT", "1") == "1"
 # Источник, в котором у большинства строк ингредиентов нет количества (битый парсинг) — не переписываем.
 SKIP_NO_QUANTITIES = os.getenv("SKIP_NO_QUANTITIES", "1") == "1"
+SKIP_RECIPE_REFS = os.getenv("SKIP_RECIPE_REFS", "1") == "1"
 NO_QTY_RATIO = float(os.getenv("NO_QTY_RATIO", "0.7"))
 NO_QTY_MIN_LINES = int(os.getenv("NO_QTY_MIN_LINES", "4"))
 
@@ -1456,6 +1457,29 @@ def no_quantity_ratio(ingredients: str) -> tuple[float, int]:
         return 0.0, 0
     nq = [l for l in lines if not _HAS_QTY_RE.match(l)]
     return len(nq) / len(lines), len(lines)
+
+
+_RECIPE_REF_LINE_RE = re.compile(
+    r"^\s*(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛]|half(?:\s+of)?(?:\s+a)?|one)\s+"
+    r"(?:of\s+)?(?:the\s+)?recipes?\b"
+    r"|^\s*(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛]|half|one)\s+batch(?:es)?\s+of\b[^\n]*\brecipe\b"
+    r"|^\s*(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛]|half|one)\s+servings?\s+of\b[^\n]*\brecipe\b"
+    r"|\brecipe\s+for\b"
+    r"|\bsee\s+recipe\b"
+    r"|\(\s*see\b[^)\n]*\brecipe\b[^)\n]*\)"
+    r"|\bfrom\s+the\s+recipe\b|\brecipe\s+(?:above|below)\b",
+    re.IGNORECASE,
+)
+
+
+def has_recipe_ref(ingredients: str) -> list[str]:
+    """Строки сырого списка ингредиентов, где количество/текст ссылается на другой рецепт."""
+    hits: list[str] = []
+    for raw_line in (ingredients or "").splitlines():
+        line = raw_line.strip()
+        if line and _RECIPE_REF_LINE_RE.search(line):
+            hits.append(line)
+    return hits
 
 
 _COMMON_DUP_NAMES = re.compile(
@@ -1710,6 +1734,7 @@ def format_adapt_exclude_line(
     skipped_exists_ids: Sequence[int],
     missing_qty_ids: Sequence[int] = (),
     existing_exclude_ids: Sequence[int] = (),
+    ref_ids: Sequence[int] = (),
 ) -> str | None:
     all_ids = sorted(
         set(manual_ids)
@@ -1718,6 +1743,7 @@ def format_adapt_exclude_line(
         | set(skipped_exists_ids)
         | set(missing_qty_ids)
         | set(existing_exclude_ids)
+        | set(ref_ids)
     )
     if not all_ids:
         return None
@@ -1788,6 +1814,7 @@ def main() -> int:
 
     failed_ids, missing_in_db, invalid_servings_ids, manual_ids = [], [], [], []
     missing_qty_ids: list[int] = []
+    recipe_ref_ids: list[int] = []
     skipped_exists_ids: list[int] = []
     ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     total_saved_ids = 0
@@ -1876,6 +1903,17 @@ def main() -> int:
                                 f"{[l.strip()[:60] for l in (rows_by_id[rid].get('ingredients_list') or '').splitlines() if l.strip()][:3]}"
                             )
                             missing_qty_ids.append(rid)
+                            eligible_ids.remove(rid)
+
+                if is_rewrite_pipeline and SKIP_RECIPE_REFS:
+                    for rid in list(eligible_ids):
+                        ref_lines = has_recipe_ref(rows_by_id[rid].get("ingredients_list") or "")
+                        if ref_lines:
+                            LOGGER.error(
+                                f"ID {rid}: в источнике ссылка на другой рецепт — пропущен "
+                                f"(SKIP_RECIPE_REFS=0 отключает пропуск). Строки: {ref_lines[:2]}"
+                            )
+                            recipe_ref_ids.append(rid)
                             eligible_ids.remove(rid)
 
                 for rid in eligible_ids:
@@ -2179,6 +2217,10 @@ def main() -> int:
         LOGGER.warning(f"Пропущено (нет в БД): {len(missing_in_db)} ID")
     if missing_qty_ids:
         LOGGER.error(f"Источник без количеств, нужен повторный парсинг: {sorted(set(missing_qty_ids))}")
+    if recipe_ref_ids:
+        LOGGER.error(
+            f"Рецепты со ссылкой на другой рецепт, нужна ручная обработка: {sorted(set(recipe_ref_ids))}"
+        )
     if manual_ids:
         LOGGER.error(f"Требуют ручной обработки (несколько вариантов в одном списке): {sorted(set(manual_ids))}")
     if invalid_servings_ids:
@@ -2198,6 +2240,7 @@ def main() -> int:
             skipped_exists_ids,
             missing_qty_ids=missing_qty_ids,
             existing_exclude_ids=adapt_exclude_list,
+            ref_ids=recipe_ref_ids,
         )
         if exclude_line:
             LOGGER.info(f"Для исключения при следующем запуске:\n{exclude_line}")
