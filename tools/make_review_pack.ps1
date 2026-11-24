@@ -13,6 +13,7 @@ python tests\test_adapt.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding ut
 python tests\test_scale_choice.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding utf8
 python tests\test_recipe_refs.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding utf8
 python tests\test_force_backup.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding utf8
+python tests\test_api_usage_log.py 2>&1 | Out-File "$out\tests.txt" -Append -Encoding utf8
 python -m py_compile rewr-transl.py checks.py 2>&1 | Out-File "$out\compile.txt" -Encoding utf8
 if (-not (Test-Path "$out\worker_notes.md")) {
 @"
