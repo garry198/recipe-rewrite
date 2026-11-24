@@ -72,6 +72,12 @@ if APP_MODE not in ("rewrite", "translate", "adapt"):
 
 FETCH_SIZE = int(os.getenv("FETCH_SIZE", "3"))
 SLEEP_BETWEEN_REQUESTS = float(os.getenv("SLEEP_BETWEEN_REQUESTS", "2.0"))
+API_RETRIES = int(os.getenv("API_RETRIES", "2"))
+API_RETRY_BACKOFF = [
+    float(x.strip()) for x in os.getenv("API_RETRY_BACKOFF", "5,20").split(",") if x.strip()
+]
+API_SPLIT_ON_FAIL = os.getenv("API_SPLIT_ON_FAIL", "1").lower() in {"1", "true", "yes", "on"}
+MAX_RUN_COST_USD = float(os.getenv("MAX_RUN_COST_USD", "0"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
 
 REWRITE_IDS_RAW = os.getenv("REWRITE_IDS", "").strip()
@@ -2033,6 +2039,67 @@ def format_adapt_exclude_line(
     return f"ADAPT_EXCLUDE_IDS={','.join(map(str, all_ids))}"
 
 
+def check_cost_limit(total_cost_usd: float, max_run_cost_usd: float) -> bool:
+    return max_run_cost_usd > 0 and total_cost_usd >= max_run_cost_usd
+
+
+def call_api_with_retries(
+    call_fn,
+    prompt_rows: Sequence[dict[str, Any]],
+    build_prompt_fn,
+    retries: int,
+    backoff: Sequence[float],
+    split_on_fail: bool,
+    tracker,
+    sleep_fn=None,
+    logger=None,
+) -> list[tuple[list[int], Any]]:
+    """Вызов API с повторами при исключении и опциональным разбиением батча на одиночные запросы."""
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if logger is None:
+        logger = LOGGER
+    def _row_ids(rows_seq: Sequence[dict[str, Any]]) -> list[int]:
+        return [int(r["rewrite_row_id"] if r.get("rewrite_row_id") is not None else r["recipe_id"]) for r in rows_seq]
+
+    def _try_call(rows_seq: Sequence[dict[str, Any]]) -> Any:
+        rids = _row_ids(rows_seq)
+        prompt_text = build_prompt_fn(rows_seq)
+        max_attempts = 1 + max(0, int(retries))
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                return call_fn(prompt_text)
+            except Exception as exc:
+                last_exc = exc
+                tracker.failed_calls += 1
+                logger.warning(
+                    f"[API] Попытка {attempt + 1}/{max_attempts} для ID {rids} завершилась ошибкой: {exc}"
+                )
+                if attempt + 1 < max_attempts:
+                    delay = backoff[min(attempt, len(backoff) - 1)] if backoff else 0.0
+                    if delay > 0:
+                        sleep_fn(delay)
+        assert last_exc is not None
+        raise last_exc
+
+    all_ids = _row_ids(prompt_rows)
+    try:
+        return [(all_ids, _try_call(prompt_rows))]
+    except Exception:
+        if not (split_on_fail and len(prompt_rows) > 1):
+            raise
+        logger.warning(f"[API] Батч ID {all_ids} упал после повторов — разбиваю на одиночные запросы.")
+        results: list[tuple[list[int], Any]] = []
+        for single_row in prompt_rows:
+            s_id = _row_ids([single_row])
+            try:
+                results.append((s_id, _try_call([single_row])))
+            except Exception:
+                results.append((s_id, None))
+        return results
+
+
 def main() -> int:
     validate_locale_env_sync()
     is_rewrite_pipeline = APP_MODE in ("rewrite", "adapt")
@@ -2166,6 +2233,15 @@ def main() -> int:
 
     try:
         for batch_number, batch_ids in enumerate(batches, start=1):
+            if check_cost_limit(SESSION_TRACKER.total_cost_usd, MAX_RUN_COST_USD):
+                remaining_ids = [rid for b in batches[batch_number - 1:] for rid in b]
+                retry_var = "TRANSLATE_IDS" if APP_MODE == "translate" else ("ADAPT_IDS" if APP_MODE == "adapt" else "REWRITE_IDS")
+                LOGGER.error(
+                    f"Достигнут лимит расхода MAX_RUN_COST_USD=${MAX_RUN_COST_USD:.4f} "
+                    f"(накоплено ${SESSION_TRACKER.total_cost_usd:.4f}). Остановка до следующего батча."
+                )
+                LOGGER.error(f"Необработанные ID для продолжения: {retry_var}={','.join(map(str, remaining_ids))}")
+                break
             LOGGER.info(f"--- Батч {batch_number}/{len(batches)} | ID: {batch_ids} ---")
             api_called, api_failed = False, False
             eligible_ids: list[int] = []
@@ -2313,120 +2389,131 @@ def main() -> int:
 
                         prompt_rows.append(pr)
 
-                    prompt_text = build_batch_prompt(prompt_rows)
-
                     try:
-                        response = client.models.generate_content(
-                            model=GEMINI_MODEL,
-                            contents=prompt_text,
-                            config=generation_config,
+                        api_responses = call_api_with_retries(
+                            lambda pt: client.models.generate_content(
+                                model=GEMINI_MODEL,
+                                contents=pt,
+                                config=generation_config,
+                            ),
+                            prompt_rows,
+                            build_batch_prompt,
+                            retries=API_RETRIES,
+                            backoff=API_RETRY_BACKOFF,
+                            split_on_fail=API_SPLIT_ON_FAIL,
+                            tracker=SESSION_TRACKER,
                         )
 
-                        usage = getattr(response, "usage_metadata", None)
-                        if usage:
-                            batch_api_cost = SESSION_TRACKER.add_usage(usage, GEMINI_MODEL, recipe_ids=api_requests)
-                            LOGGER.info(
-                                f"Tokens: {usage.total_token_count} | Стоимость API: ${batch_api_cost:.6f}"
-                            )
-
-                        parsed = getattr(response, "parsed", None)
-                        if parsed is not None:
-                            batch_result = parsed if isinstance(parsed, BatchRewriteResponse) else \
-                                BatchRewriteResponse.model_validate(parsed)
-                        else:
-                            text = getattr(response, "text", None)
-                            if not text:
-                                raise ValueError("Пустой ответ от Gemini.")
-                            batch_result = BatchRewriteResponse.model_validate_json(text)
-
-                        expected_ids = set(api_requests)
-                        returned_ids = {it.rewrite_row_id for it in batch_result.results}
-                        if expected_ids != returned_ids:
-                            LOGGER.error(
-                                f"Несовпадение ID: ожидалось {expected_ids}, получено {returned_ids}"
-                            )
-                            failed_ids.extend(expected_ids - returned_ids)
-
-                        seen_ids: set[int] = set()
-                        uniq = []
-                        for it in batch_result.results:
-                            if it.rewrite_row_id in expected_ids and it.rewrite_row_id not in seen_ids:
-                                seen_ids.add(it.rewrite_row_id)
-                                uniq.append(it)
-                        batch_result.results = uniq
-
                         valid_results: list[RewrittenRecipe] = []
-                        for item in batch_result.results:
-                            if is_rewrite_pipeline:
-                                warns = validate_and_fix_rewrite(
-                                    item, rows_by_id[item.rewrite_row_id],
-                                )
-                                for w in warns:
-                                    LOGGER.warning(f"ID {item.rewrite_row_id} (API): {w}")
+                        for req_ids, response in api_responses:
+                            if response is None:
+                                api_failed = True
+                                failed_ids.extend([rid for rid in req_ids if rid not in failed_ids])
+                                continue
 
-                                if STRICT_REWRITE_CHECKS:
-                                    hard = [m for m in prep_check(item.ingredients_list, item.cooking_instructions)
-                                            if m in HARD_PREP]
-                                    hard += [f"form:{m}" for m in form_check(item.ingredients_list, item.cooking_instructions)
-                                             if m in HARD_FORM]
-                                    hard_refs = recipe_ref_check(item.ingredients_list, item.cooking_instructions)
-                                    if hard and not hard_refs and AUTO_FIX_PREP:
-                                        labels = [h.replace("form:", "") for h in hard]
-                                        item.cooking_instructions, fixed = auto_fix_prep(
-                                            item.ingredients_list, item.cooking_instructions, labels)
-                                        if fixed:
-                                            LOGGER.warning(
-                                                f"ID {item.rewrite_row_id}: шаг подготовки добавлен автоматически "
-                                                f"({labels}: {fixed}) — повторный запрос не нужен.")
-                                            hard = [m for m in prep_check(item.ingredients_list,
-                                                                          item.cooking_instructions)
-                                                    if m in HARD_PREP]
-                                            hard += [f"form:{m}" for m in form_check(item.ingredients_list,
-                                                                                    item.cooking_instructions)
-                                                     if m in HARD_FORM]
-                                    if hard or hard_refs:
-                                        LOGGER.error(
-                                            f"ID {item.rewrite_row_id}: отклонён строгой проверкой "
-                                            f"(нет шагов: {hard}; ссылки: {hard_refs}) — повторите ID."
-                                        )
+                            usage = getattr(response, "usage_metadata", None)
+                            if usage:
+                                batch_api_cost = SESSION_TRACKER.add_usage(usage, GEMINI_MODEL, recipe_ids=req_ids)
+                                LOGGER.info(
+                                    f"Tokens: {usage.total_token_count} | Стоимость API: ${batch_api_cost:.6f}"
+                                )
+
+                            parsed = getattr(response, "parsed", None)
+                            if parsed is not None:
+                                batch_result = parsed if isinstance(parsed, BatchRewriteResponse) else \
+                                    BatchRewriteResponse.model_validate(parsed)
+                            else:
+                                text = getattr(response, "text", None)
+                                if not text:
+                                    raise ValueError("Пустой ответ от Gemini.")
+                                batch_result = BatchRewriteResponse.model_validate_json(text)
+
+                            expected_ids = set(req_ids)
+                            returned_ids = {it.rewrite_row_id for it in batch_result.results}
+                            if expected_ids != returned_ids:
+                                LOGGER.error(
+                                    f"Несовпадение ID: ожидалось {expected_ids}, получено {returned_ids}"
+                                )
+                                failed_ids.extend(expected_ids - returned_ids)
+
+                            seen_ids: set[int] = set()
+                            uniq = []
+                            for it in batch_result.results:
+                                if it.rewrite_row_id in expected_ids and it.rewrite_row_id not in seen_ids:
+                                    seen_ids.add(it.rewrite_row_id)
+                                    uniq.append(it)
+                            batch_result.results = uniq
+
+                            for item in batch_result.results:
+                                if is_rewrite_pipeline:
+                                    warns = validate_and_fix_rewrite(
+                                        item, rows_by_id[item.rewrite_row_id],
+                                    )
+                                    for w in warns:
+                                        LOGGER.warning(f"ID {item.rewrite_row_id} (API): {w}")
+
+                                    if STRICT_REWRITE_CHECKS:
+                                        hard = [m for m in prep_check(item.ingredients_list, item.cooking_instructions)
+                                                if m in HARD_PREP]
+                                        hard += [f"form:{m}" for m in form_check(item.ingredients_list, item.cooking_instructions)
+                                                 if m in HARD_FORM]
+                                        hard_refs = recipe_ref_check(item.ingredients_list, item.cooking_instructions)
+                                        if hard and not hard_refs and AUTO_FIX_PREP:
+                                            labels = [h.replace("form:", "") for h in hard]
+                                            item.cooking_instructions, fixed = auto_fix_prep(
+                                                item.ingredients_list, item.cooking_instructions, labels)
+                                            if fixed:
+                                                LOGGER.warning(
+                                                    f"ID {item.rewrite_row_id}: шаг подготовки добавлен автоматически "
+                                                    f"({labels}: {fixed}) — повторный запрос не нужен.")
+                                                hard = [m for m in prep_check(item.ingredients_list,
+                                                                              item.cooking_instructions)
+                                                        if m in HARD_PREP]
+                                                hard += [f"form:{m}" for m in form_check(item.ingredients_list,
+                                                                                        item.cooking_instructions)
+                                                         if m in HARD_FORM]
+                                        if hard or hard_refs:
+                                            LOGGER.error(
+                                                f"ID {item.rewrite_row_id}: отклонён строгой проверкой "
+                                                f"(нет шагов: {hard}; ссылки: {hard_refs}) — повторите ID."
+                                            )
+                                            failed_ids.append(item.rewrite_row_id)
+                                            SESSION_TRACKER.rejected_items += 1
+                                            continue
+
+                                if APP_MODE == "translate":
+                                    prot = protected[item.rewrite_row_id]
+                                    item.ingredients_list = strip_nutrition_block(item.ingredients_list)
+                                    item.cooking_instructions = strip_nutrition_block(item.cooking_instructions)
+
+                                    problems = validate_translation(item, prot)
+                                    if not item.dish_name.strip():
+                                        problems.append("dish_name пустой")
+                                    if problems:
+                                        LOGGER.error(f"ID {item.rewrite_row_id}: {'; '.join(problems)}")
                                         failed_ids.append(item.rewrite_row_id)
-                                        SESSION_TRACKER.rejected_items += 1
                                         continue
 
-                            if APP_MODE == "translate":
-                                prot = protected[item.rewrite_row_id]
-                                item.ingredients_list = strip_nutrition_block(item.ingredients_list)
-                                item.cooking_instructions = strip_nutrition_block(item.cooking_instructions)
-
-                                problems = validate_translation(item, prot)
-                                if not item.dish_name.strip():
-                                    problems.append("dish_name пустой")
-                                if problems:
-                                    LOGGER.error(f"ID {item.rewrite_row_id}: {'; '.join(problems)}")
-                                    failed_ids.append(item.rewrite_row_id)
-                                    continue
-
-                                item.ingredients_list = restore_units(item.ingredients_list, prot["mapping"])
-                                item.cooking_instructions = restore_units(
-                                    item.cooking_instructions, prot["mapping"],
-                                )
-                                item.servings = prot["servings"]
-
-                                leftovers = final_check(
-                                    item.ingredients_list + "\n" + item.cooking_instructions,
-                                )
-                                if leftovers:
-                                    LOGGER.error(
-                                        f"ID {item.rewrite_row_id}: остались US-единицы/плейсхолдеры: {leftovers}"
+                                    item.ingredients_list = restore_units(item.ingredients_list, prot["mapping"])
+                                    item.cooking_instructions = restore_units(
+                                        item.cooking_instructions, prot["mapping"],
                                     )
-                                    failed_ids.append(item.rewrite_row_id)
-                                    continue
+                                    item.servings = prot["servings"]
 
-                            valid_results.append(item)
+                                    leftovers = final_check(
+                                        item.ingredients_list + "\n" + item.cooking_instructions,
+                                    )
+                                    if leftovers:
+                                        LOGGER.error(
+                                            f"ID {item.rewrite_row_id}: остались US-единицы/плейсхолдеры: {leftovers}"
+                                        )
+                                        failed_ids.append(item.rewrite_row_id)
+                                        continue
+
+                                valid_results.append(item)
 
                     except Exception:
                         api_failed = True
-                        SESSION_TRACKER.failed_calls += 1
                         raise
 
                     for item in valid_results:

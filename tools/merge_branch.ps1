@@ -1,12 +1,15 @@
 ﻿# Merge a worker branch into main locally (run by the owner after Claude's approval).
-# Usage:  .\tools\merge_branch.ps1 worker/rNN [-DryRun] [-Offline]
+# Usage:  .\tools\merge_branch.ps1 worker/rNN [-DryRun] [-Offline] [-SkipTests]
 param(
     [Parameter(Mandatory = $true, Position = 0)][string]$Branch,
     [switch]$DryRun,
-    [switch]$Offline
+    [switch]$Offline,
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = "1"
 
 function Invoke-Step {
     param([string]$Label, [scriptblock]$Action)
@@ -15,6 +18,48 @@ function Invoke-Step {
         return
     }
     & $Action
+}
+
+function Run-AllChecks {
+    param([string]$ContextLabel)
+    $suites = & "$PSScriptRoot\test_suites.ps1"
+    $summaries = @()
+    $allOk = $true
+
+    foreach ($suite in $suites) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $out = python $suite 2>&1
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+
+        $lines = $out | ForEach-Object { $_.ToString() }
+        $important = $lines | Where-Object { $_ -match "ИТОГО|OK   golden|FAIL|Traceback|Error|Exception" }
+        foreach ($ln in $important) { Write-Host "  [$suite] $ln" }
+
+        if ($code -ne 0) {
+            Write-Warning "Провал ($ContextLabel): $suite (exit $code)"
+            $allOk = $false
+            break
+        }
+        $lastSummary = ($lines | Where-Object { $_ -match "ИТОГО|OK   golden" } | Select-Object -Last 1)
+        if ($lastSummary) { $summaries += $lastSummary.Trim() }
+    }
+
+    if ($allOk) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $compOut = python -m py_compile rewr-transl.py checks.py 2>&1
+        $compCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($compCode -ne 0) {
+            $compOut | ForEach-Object { Write-Host $_ }
+            Write-Warning "Провал py_compile ($ContextLabel)."
+            $allOk = $false
+        }
+    }
+
+    return @{ Ok = $allOk; Summary = ($summaries -join " | ") }
 }
 
 $origBranch = (git rev-parse --abbrev-ref HEAD).Trim()
@@ -36,6 +81,26 @@ if (-not $DryRun) {
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Локальная ветка '$Branch' не найдена."
         exit 1
+    }
+}
+
+# 1.5. Pre-merge tests on target branch
+if ($SkipTests) {
+    Write-Host "[SKIP-TESTS] Проверка тестов перед слиянием пропущена (-SkipTests)."
+} else {
+    Invoke-Step "Pre-merge проверка всех тестов из tools/test_suites.ps1 и py_compile на ветке $Branch" {
+        if ($origBranch -ne $Branch) {
+            git checkout $Branch
+            if ($LASTEXITCODE -ne 0) { throw "Не удалось переключиться на $Branch." }
+        }
+        $pre = Run-AllChecks -ContextLabel "pre-merge:$Branch"
+        if (-not $pre.Ok) {
+            if ($origBranch -and $origBranch -ne $Branch -and $origBranch -ne "HEAD") {
+                git checkout $origBranch 2>$null
+            }
+            Write-Error "Тесты на ветке '$Branch' не пройдены. Слияние отменено."
+            exit 1
+        }
     }
 }
 
@@ -80,27 +145,24 @@ Invoke-Step "git merge --no-ff $Branch -m `"Merge $Branch`"" {
     }
 }
 
-# 4. Run regression tests and py_compile
+# 4. Post-merge tests and py_compile
 $testSummary = "(dry-run)"
-Invoke-Step "python tests\test_regressions.py; python -m py_compile rewr-transl.py checks.py" {
-    $testOutput = python tests\test_regressions.py 2>&1
-    $testExit = $LASTEXITCODE
-    $testOutput | ForEach-Object { Write-Host $_ }
-
-    python -m py_compile rewr-transl.py checks.py 2>&1 | ForEach-Object { Write-Host $_ }
-    $compileExit = $LASTEXITCODE
-
-    if ($testExit -ne 0 -or $compileExit -ne 0) {
-        Write-Warning "Проверки не пройдены. Откатываю main к ORIG_HEAD..."
-        git reset --hard ORIG_HEAD
-        if ($origBranch -and $origBranch -ne "main" -and $origBranch -ne "HEAD") {
-            git checkout $origBranch 2>$null
+if ($SkipTests) {
+    $testSummary = "пропущено (-SkipTests)"
+} else {
+    Invoke-Step "Post-merge проверка всех тестов из tools/test_suites.ps1 и py_compile на main" {
+        $post = Run-AllChecks -ContextLabel "post-merge:main"
+        if (-not $post.Ok) {
+            Write-Warning "Проверки после слияния не пройдены. Откатываю main к ORIG_HEAD..."
+            git reset --hard ORIG_HEAD
+            if ($origBranch -and $origBranch -ne "main" -and $origBranch -ne "HEAD") {
+                git checkout $origBranch 2>$null
+            }
+            Write-Error "Тесты или py_compile после слияния завершились с ошибкой. Изменения откачены."
+            exit 1
         }
-        Write-Error "Тесты или py_compile завершились с ошибкой. Изменения откачены."
-        exit 1
+        $script:testSummary = if ($post.Summary) { $post.Summary } else { "все тесты пройдены" }
     }
-    $script:testSummary = ($testOutput | Select-String -Pattern "ИТОГО:" | Select-Object -Last 1).ToString().Trim()
-    if (-not $script:testSummary) { $script:testSummary = "тесты пройдены (exit 0)" }
 }
 
 # 5. Push main
