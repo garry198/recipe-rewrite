@@ -1,20 +1,24 @@
 # Контракты со смежными пайплайнами
 
-> Статус: черновик. Пункты «ПРОВЕРИТЬ» подтверждаются заданием r01 (SELECT через mysql_ro), до этого не полагаться.
+> Статус: частично подтверждено в `r01` (схема БД и код `rewr-transl.py`, см. [DB_SCHEMA.md](DB_SCHEMA.md)).
+> Пункты, относящиеся к смежным пайплайнам вне этого репозитория, оставлены с пометкой «ПРОВЕРИТЬ / неизвестно».
 
 ## Общая БД (MariaDB)
 | Таблица | Кто пишет | Кто читает |
 |---|---|---|
-| `recipes3` | recipe-ingest (парсер сайтов) | rewrite (источник EN-текста) |
-| `recipe_rewrite` | **rewrite (этот проект)** | cost-nutrients, Book Pipeline (all-in-one2) |
-| `price_history` | cost-nutrients | Book Pipeline (фильтр по `locale`) |
+| `recipes3` | recipe-ingest (в коде этого репозитория не подтверждено: неизвестно) | в коде `rewr-transl.py` **не читается** (перенос `recipes3` → `recipe_rewrite` делает внешний процесс владельца, его нет в этом репозитории — неизвестно, уточнит владелец) |
+| `recipe_rewrite` | **rewrite (этот проект)** (`rewr-transl.py`: `UPDATE` в режиме `rewrite`, `INSERT ... ON DUPLICATE KEY UPDATE` в режиме `translate`) | **rewrite (`rewr-transl.py`)**; cost-nutrients, Book Pipeline — неизвестно по коду этого репозитория |
+| `price_history` | в этом репозитории не пишется (cost-nutrients — неизвестно) | в этом репозитории не читается (Book Pipeline — неизвестно) |
 
-ПРОВЕРИТЬ: точные колонки `recipe_rewrite` (id, status, market, locale, servings, ingredients, instructions, служебные),
-какие из них читают другие пайплайны, какие значения `status` означают «готово к расчёту цен/КБЖУ».
+Подтверждённые факты по `recipe_rewrite` (подробнее в [DB_SCHEMA.md](DB_SCHEMA.md)):
+- Точные колонки: `id`, `recipe_id`, `market`, `locale`, `variant_type`, `cooking_instructions_variant`, `search_text`, `instructions_hash`, `status` (`enum('draft','active','archived')`, `DEFAULT 'active'`), `created_at`, `updated_at`, `ai_model`, `dish_name_variant`, `ingredients_list_variant`, `calories_per_person`, `proteins_per_person`, `fats_per_person`, `carbohydrates_per_person`, `netcarbs_per_person`, `serves`, `prep_time_minutes`, `cook_time_minutes`, `dish_cost_local`, `currency`, `nutrients_recalc_version`, `needs_reprice`, `dish_cost_serves`.
+- В БД сейчас все 4139 строк `recipe_rewrite` имеют `status = 'active'`; `market = 'US'` / `locale = 'en_US'` (4128 строк), `market = 'fr'` / `locale = 'fr_FR'` (11 строк). В `price_history`: `market = 'us'` / `locale = 'en_US'` (30531 строка).
+- Collation колонки `market` в обеих таблицах (`recipe_rewrite` и `price_history`) — `utf8mb4_unicode_ci` (регистронезависимая). Book Pipeline (`all-in-one2`) фильтрует `rr.market = 'us'` (нижний регистр) и совпадает с `'US'` только за счёт регистронезависимой collation (**риск: при смене collation выборка книги станет пустой**).
+- ПРОВЕРИТЬ (неизвестно по коду этого репозитория): какие колонки `recipe_rewrite` читают другие пайплайны и какие значения `status` означают «готово к расчёту цен/КБЖУ».
 
 ## Что rewrite обязан гарантировать downstream
-1. Строка в `recipe_rewrite` создаётся/обновляется с корректными `market` и `locale` (`en_US`, `fr_FR`, далее `de_DE`).
-2. `servings` в результате = целевое число порций (задаётся кодом, не моделью).
+1. В режиме `translate` строка в `recipe_rewrite` создаётся/обновляется с `TARGET_MARKET`, `TARGET_LOCALE` и `TARGET_CURRENCY`; в режиме `rewrite` обновляется существующая строка по `id` без изменения `market`/`locale`. Значения `market`/`locale` писать строго в том регистре, который уже есть в таблице: `'US'`/`en_US`, `'fr'`/`fr_FR`, для немецкого — `'de'`/`de_DE` (существующие строки не переименовывать).
+2. Колонка в БД — `serves` (не `servings`); `servings` существует только в схеме ответа модели (Pydantic). Значение `serves` в `recipe_rewrite` = целевое число порций (задаётся кодом в `rewr-transl.py`, не моделью).
 3. Список ингредиентов: одна строка на ингредиент, без маркеров; только US-меры для `en_US`
    (cost-nutrients парсит количества — формат менять нельзя без согласования, ПРОВЕРИТЬ `nutrition_parser_v12`).
 4. Инструкции: обычный текст, абзац на шаг, пустая строка между шагами, без нумерации (Book Pipeline сам нумерует
