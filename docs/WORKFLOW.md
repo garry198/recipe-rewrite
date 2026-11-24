@@ -23,3 +23,6 @@ Claude проверяет не только код, но и: не выросла
 - **Логи в UTF-8 в Windows PowerShell 5.1**:
   - Используйте `python rewr-transl.py 2>&1 | Out-File logs\run.log -Encoding utf8` (и при необходимости `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:PYTHONUTF8 = "1"`).
   - **Внимание:** оператор `>` и `Tee-Object` в PowerShell 5.1 по умолчанию пишут в **UTF-16LE**, что ломает UTF-8-инструменты и diff — для UTF-8 используйте `Out-File -Encoding utf8`.
+- **Пакет сдачи `reviews/rNN/`**: собирается `.\tools\make_review_pack.ps1 rNN` и содержит `diff.patch`, `stat.txt`, `commits.txt`, `tests.txt`, `compile.txt`, `worker_notes.md` (и при разрешении конфликта слияния — `merge_resolution.patch`).
+- **Эталонный прогон**: набор из 12 `recipes3.id` и порядок сравнения до/после описаны в [docs/REFERENCE_IDS.md](REFERENCE_IDS.md) (прогон с `DRY_RUN=1` запускает владелец; воркер API не запускает).
+- **Обмен между чатами**: правила и шаблон сообщений — в [inbox/README.md](../inbox/README.md).

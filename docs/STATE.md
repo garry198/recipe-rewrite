@@ -23,7 +23,8 @@
 - r08 — пропуск рецептов со ссылкой на другой рецепт (`SKIP_RECIPE_REFS=1`, `has_recipe_ref`) (**слита** в `main`)
 - r09 — переделка рерайтов с потерянными количествами: backup, `rollback_force.py`, отчёт `force_report` (**слита** в `main`)
 - r10 — учёт аккаунта и контекста запуска в `api_usage.csv` (`GEMINI_ACCOUNT_LABEL`, дефолт `"main"` — согласовано с `cost-nutrients (q41.8)` и `Book Pipeline`, `key_fp`, `api_usage_report.py`; **слита** в `main`)
-- r11 — надёжность процесса: тесты перед слиянием (`tools/test_suites.ps1`), повтор API + split, лимит `MAX_RUN_COST_USD` (в `worker/r11`)
+- r11 — надёжность процесса: тесты перед слиянием (`tools/test_suites.ps1`), повтор API + split, лимит `MAX_RUN_COST_USD` (**слита** в `main`)
+- r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`)
 - r12 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
 - r13 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
