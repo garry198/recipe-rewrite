@@ -1639,8 +1639,17 @@ def format_adapt_exclude_line(
     failed_ids: Sequence[int],
     invalid_servings_ids: Sequence[int],
     skipped_exists_ids: Sequence[int],
+    missing_qty_ids: Sequence[int] = (),
+    existing_exclude_ids: Sequence[int] = (),
 ) -> str | None:
-    all_ids = sorted(set(manual_ids) | set(failed_ids) | set(invalid_servings_ids) | set(skipped_exists_ids))
+    all_ids = sorted(
+        set(manual_ids)
+        | set(failed_ids)
+        | set(invalid_servings_ids)
+        | set(skipped_exists_ids)
+        | set(missing_qty_ids)
+        | set(existing_exclude_ids)
+    )
     if not all_ids:
         return None
     return f"ADAPT_EXCLUDE_IDS={','.join(map(str, all_ids))}"
@@ -2113,7 +2122,12 @@ def main() -> int:
         )
     if APP_MODE == "adapt":
         exclude_line = format_adapt_exclude_line(
-            manual_ids, failed_ids, invalid_servings_ids, skipped_exists_ids,
+            manual_ids,
+            failed_ids,
+            invalid_servings_ids,
+            skipped_exists_ids,
+            missing_qty_ids=missing_qty_ids,
+            existing_exclude_ids=adapt_exclude_list,
         )
         if exclude_line:
             LOGGER.info(f"Для исключения при следующем запуске:\n{exclude_line}")
