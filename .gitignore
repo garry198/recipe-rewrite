@@ -13,3 +13,6 @@ api_usage.csv
 *.sqlite3-shm
 reviews/*
 !reviews/.gitkeep
+inbox/*
+!inbox/README.md
+!inbox/TEMPLATE.md
