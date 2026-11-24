@@ -127,6 +127,11 @@ check("безопасная температура курицы", C.fix_safety_t
 check("ссылка на рецепт в списке", C.strip_recipe_refs("1/2 recipe fresh salsa"), "prepared fresh salsa, for serving")
 check("style_check poultry", C.style_check("1 lb chicken", "Cook the poultry.", ""), lambda x: len(x) == 1)
 check("run_hash unchanged (r04.3)", ns["generate_run_hash"]("TEST_PROMPT", "gemini-3.8-flash", "4/8/2.5"), lambda h: h == "c31fc268")
+# --- r06.12: prep_check 'seed' в перечислении (1053)
+check("prep_check seed с запятой (1053)", C.prep_check("1/4 cup roasted red pepper, peeled, seeded, and chopped", "Peel, seed, and chop 1/4 cup roasted red pepper."), lambda x: x == [])
+check("prep_check seed отсутствует", C.prep_check("1/4 cup roasted red pepper, peeled, seeded, and chopped", "Peel and chop 1/4 cup roasted red pepper."), lambda x: "seed" in x)
+check("prep_check sesame seeds не ложное", C.prep_check("1 tbsp sesame seeds", "Sprinkle on top."), lambda x: x == [])
+check("prep_check seed без запятой", C.prep_check("1/4 cup roasted red pepper, peeled, seeded, and chopped", "Peel, seed and chop 1/4 cup roasted red pepper."), lambda x: x == [])
 
 print("\nИТОГО:", "все тесты пройдены" if not fails else f"упало {len(fails)}: {fails}")
 sys.exit(1 if fails else 0)
