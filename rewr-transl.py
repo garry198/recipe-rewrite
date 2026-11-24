@@ -104,6 +104,7 @@ STRICT_REWRITE_CHECKS = os.getenv("STRICT_REWRITE_CHECKS", "1") == "1"
 HARD_FORM = {"mince"}  # «minced garlic» в списке, а в методе целые зубчики — строгая проверка
 HARD_PREP = {"drain", "squeez", "peel", "husk", "trim", "seed", "thaw"}  # 'soften'/'rinse' не строгие (много ложных)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_ACCOUNT_LABEL = os.getenv("GEMINI_ACCOUNT_LABEL", "default").strip() or "default"
 THINKING_LEVEL = os.getenv("THINKING_LEVEL", "low").lower()
 CACHE_TTL_DAYS = int(os.getenv("CACHE_TTL_DAYS", "30"))
 
@@ -922,14 +923,23 @@ class BatchRewriteResponse(BaseModel):
 
 
 # ================= ТРЕКЕР РАСХОДОВ API =================
+def api_key_fingerprint(api_key: str | None) -> str:
+    if not api_key:
+        return ""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:8]
+
+
 class SessionCostTracker:
     """Считает расход по usage_metadata и пишет КАЖДЫЙ вызов в api_usage.csv для сверки с биллингом Google.
     Платными считаются все токены, которых нет в prompt_token_count: output = total - prompt
     (в него входят кандидаты, мысли, tool-use), поэтому ничего не теряется, даже если какое-то поле не заполнено."""
 
     USAGE_LOG = BASE_DIR / "api_usage.csv"
-    FIELDS = ["time", "model", "prompt", "cached", "candidates", "thoughts", "tool_use", "total",
-              "billed_output", "cost_usd", "price_in", "price_out", "price_known"]
+    FIELDS = [
+        "time", "model", "prompt", "cached", "candidates", "thoughts", "tool_use", "total",
+        "billed_output", "cost_usd", "price_in", "price_out", "price_known",
+        "account_label", "key_fp", "run_hash", "app_mode", "recipe_ids", "dry_run", "run_ts",
+    ]
 
     def __init__(self):
         self.requests = 0
@@ -940,8 +950,51 @@ class SessionCostTracker:
         self.thought_tokens = 0
         self.total_cost_usd = 0.0
         self._warned_unknown = False
+        self.account_label = GEMINI_ACCOUNT_LABEL
+        self.key_fp = ""
+        self.run_hash = ""
+        self.app_mode = APP_MODE
+        self.dry_run = DRY_RUN
+        self.run_ts = ""
 
-    def add_usage(self, usage_metadata, model_name: str) -> float:
+    def set_run_context(
+        self,
+        account_label: str,
+        key_fp: str,
+        run_hash: str,
+        app_mode: str,
+        dry_run: bool,
+        run_ts: str,
+    ) -> None:
+        self.account_label = account_label or "default"
+        self.key_fp = key_fp
+        self.run_hash = run_hash
+        self.app_mode = app_mode
+        self.dry_run = bool(dry_run)
+        self.run_ts = run_ts
+
+    def _prepare_usage_file(self) -> bool:
+        if not self.USAGE_LOG.exists():
+            return True
+        with self.USAGE_LOG.open("r", newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh, delimiter=";")
+            try:
+                first_row = next(reader)
+            except StopIteration:
+                first_row = []
+        if first_row == self.FIELDS:
+            return False
+        ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+        legacy_path = self.USAGE_LOG.parent / f"api_usage_legacy_{ts_tag}.csv"
+        idx = 1
+        while legacy_path.exists():
+            legacy_path = self.USAGE_LOG.parent / f"api_usage_legacy_{ts_tag}_{idx}.csv"
+            idx += 1
+        self.USAGE_LOG.rename(legacy_path)
+        LOGGER.warning(f"Заголовок {self.USAGE_LOG.name} устарел. Старый файл сохранён как {legacy_path.name}")
+        return True
+
+    def add_usage(self, usage_metadata, model_name: str, recipe_ids: Sequence[int] = ()) -> float:
         if not usage_metadata:
             return 0.0
         g = lambda name: getattr(usage_metadata, name, 0) or 0  # noqa: E731
@@ -965,13 +1018,17 @@ class SessionCostTracker:
         self.thought_tokens += thoughts
         self.total_cost_usd += cost
         try:
-            new_file = not self.USAGE_LOG.exists()
+            write_header = self._prepare_usage_file()
             with self.USAGE_LOG.open("a", newline="", encoding="utf-8-sig") as fh:
                 w = csv.writer(fh, delimiter=";")
-                if new_file:
+                if write_header:
                     w.writerow(self.FIELDS)
-                w.writerow([datetime.now().isoformat(timespec="seconds"), model_name, prompt, cached, cand, thoughts,
-                            tool, total, billed_output, f"{cost:.6f}", input_price, output_price, int(known)])
+                w.writerow([
+                    datetime.now().isoformat(timespec="seconds"), model_name, prompt, cached, cand, thoughts,
+                    tool, total, billed_output, f"{cost:.6f}", input_price, output_price, int(known),
+                    self.account_label, self.key_fp, self.run_hash, self.app_mode,
+                    ",".join(str(int(rid)) for rid in recipe_ids), int(self.dry_run), self.run_ts,
+                ])
         except OSError:
             pass
         return cost
@@ -2003,13 +2060,18 @@ def main() -> int:
         return 1
 
     try:
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        api_key = os.environ["GEMINI_API_KEY"]
+        client = genai.Client(api_key=api_key)
     except KeyError:
         LOGGER.error("Не найден GEMINI_API_KEY.")
         return 1
 
     run_hash = generate_run_hash(
         system_prompt, GEMINI_MODEL, f"{RESCALE_TARGET_SERVINGS}/{RESCALE_ONLY_IF_MORE_THAN}/{RESCALE_MAX_DIVISOR}",
+    )
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    SESSION_TRACKER.set_run_context(
+        GEMINI_ACCOUNT_LABEL, api_key_fingerprint(api_key), run_hash, APP_MODE, DRY_RUN, run_ts,
     )
     LOGGER.info(
         f"Запуск | Режим: {APP_MODE.upper()} | ID: {len(rewrite_ids)} | DRY_RUN: {DRY_RUN} | "
@@ -2042,7 +2104,6 @@ def main() -> int:
     missing_qty_ids: list[int] = []
     recipe_ref_ids: list[int] = []
     skipped_exists_ids: list[int] = []
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{run_ts}.txt"
     total_saved_ids = 0
     force_meta_path: Path | None = None
@@ -2263,7 +2324,7 @@ def main() -> int:
 
                         usage = getattr(response, "usage_metadata", None)
                         if usage:
-                            batch_api_cost = SESSION_TRACKER.add_usage(usage, GEMINI_MODEL)
+                            batch_api_cost = SESSION_TRACKER.add_usage(usage, GEMINI_MODEL, recipe_ids=api_requests)
                             LOGGER.info(
                                 f"Tokens: {usage.total_token_count} | Стоимость API: ${batch_api_cost:.6f}"
                             )
@@ -2471,6 +2532,7 @@ def main() -> int:
             pass
 
         LOGGER.info("=== ЗАВЕРШЕНО ===")
+        LOGGER.info(f"Аккаунт: {SESSION_TRACKER.account_label} | key_fp: {SESSION_TRACKER.key_fp or '-'}")
         if SESSION_TRACKER.requests > 0:
             LOGGER.info("=== РАСХОДЫ НА API (СЕАНС) ===")
             LOGGER.info(f"Всего платных запросов: {SESSION_TRACKER.requests}")
