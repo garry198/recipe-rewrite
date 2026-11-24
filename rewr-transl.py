@@ -87,6 +87,14 @@ RESCALE_TARGET_SERVINGS = int(os.getenv("RESCALE_TARGET_SERVINGS", "4"))
 # Если делитель больше этого значения (16 порций -> 4 = x4), цель удваивается (16 -> 8), чтобы не получать 1/4 яйца.
 RESCALE_MAX_DIVISOR = float(os.getenv("RESCALE_MAX_DIVISOR", "3"))
 RESCALE_ONLY_IF_MORE_THAN = int(os.getenv("RESCALE_ONLY_IF_MORE_THAN", "8"))
+RESCALE_SMART = os.getenv("RESCALE_SMART", "1").lower() in {"1", "true", "yes", "on"}
+RESCALE_CANDIDATES = [
+    int(x.strip()) for x in os.getenv("RESCALE_CANDIDATES", "4,6,8,12,16,24,32").split(",") if x.strip()
+]
+RESCALE_COUNT_RE = re.compile(
+    os.getenv("RESCALE_COUNT_RE", r"\b(?:large|medium|small|extra[- ]large|whole)?\s*(?:eggs?|egg\s+yolks?|egg\s+whites?)\b"),
+    re.IGNORECASE,
+)
 # Строгие проверки рерайта: результат с этими дефектами НЕ сохраняется и НЕ кэшируется,
 # ID попадает в список повтора (REWRITE_IDS=...). Модель недетерминирована: повтор обычно проходит.
 STRICT_REWRITE_CHECKS = os.getenv("STRICT_REWRITE_CHECKS", "1") == "1"
@@ -112,7 +120,7 @@ CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
 UNITS_VERSION = "u2"
-SCALE_VERSION = "s20"
+SCALE_VERSION = "s21"
 
 EXPECTED_CSV_HEADER = [
     "Rewrite Row ID", "Recipe ID", "Previous Dish Name", "Rewritten Dish Name",
@@ -1354,6 +1362,66 @@ def target_servings_for(src_srv: int) -> int:
     return min(target, src_srv)
 
 
+_COUNT_UNIT_RE = re.compile(
+    r"^(?:fl\.?\s*oz|fluid\s+ounces?|tsps?|teaspoons?|tbsps?|tablespoons?|cups?|c\.|"
+    r"oz|ounces?|lbs?|pounds?|quarts?|qt|pints?|pt|sticks?|g|grams?|kg|ml|l)\b",
+    re.IGNORECASE,
+)
+_COUNT_NUM_RE = re.compile(r"^\s*(?P<n>\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?)\b")
+_COUNT_RANGE_AFTER_RE = re.compile(r"^\s*(?:-|–|to)\s*\d", re.IGNORECASE)
+
+
+def _countable_egg_amounts(ingredients: str) -> list[float]:
+    amounts: list[float] = []
+    for raw_line in (ingredients or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for k, v in _UNI_FRAC.items():
+            line = line.replace(k, f" {v}")
+        m = _COUNT_NUM_RE.match(line)
+        if not m:
+            continue
+        rest = line[m.end():]
+        if _COUNT_RANGE_AFTER_RE.match(rest):
+            continue
+        if _COUNT_UNIT_RE.match(rest.lstrip()):
+            continue
+        if RESCALE_COUNT_RE.search(rest):
+            amounts.append(_to_float(m.group("n")))
+    return amounts
+
+
+def _egg_penalty(src_srv: int, cand_srv: int, amounts: Sequence[float]) -> int:
+    factor = cand_srv / src_srv
+    return sum(1 for amt in amounts if abs(amt * factor - round(amt * factor)) > 1e-6)
+
+
+def choose_target_servings(src_srv: int, ingredients: str) -> int:
+    """Выбор целевого числа порций: избегает дробных счётных яиц, если есть допустимый кандидат лучше base."""
+    if not RESCALE_SMART:
+        return target_servings_for(src_srv)
+    if RESCALE_TARGET_SERVINGS <= 0 or src_srv <= RESCALE_ONLY_IF_MORE_THAN:
+        return src_srv
+    base = target_servings_for(src_srv)
+    amounts = _countable_egg_amounts(ingredients)
+    if not amounts:
+        return base
+    base_pen = _egg_penalty(src_srv, base, amounts)
+    if base_pen == 0:
+        return base
+    candidates = [
+        c for c in RESCALE_CANDIDATES
+        if RESCALE_TARGET_SERVINGS <= c < src_srv and (src_srv / c) <= RESCALE_MAX_DIVISOR
+    ]
+    if not candidates:
+        return base
+    best_pen, _, best_c = min((_egg_penalty(src_srv, c, amounts), abs(c - base), c) for c in candidates)
+    if best_pen > 0 and best_pen >= base_pen:
+        return base
+    return best_c
+
+
 _BRAND_RE = re.compile(r"\b(?:wholesome yum|besti|paleovalley)\b", re.IGNORECASE)
 _NAME_QTY_RE = re.compile(
     r"^\s*(?:\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?|[½¼¾⅓⅔])?\s*(?:-|to)?\s*(?:\d+(?:\.\d+)?)?\s*"
@@ -1421,10 +1489,10 @@ def build_sent_ingredients(src_row: dict[str, Any]) -> str:
     чтобы API-результаты и кэш-хиты проверялись одинаково."""
     ing = merge_broken_lines(src_row.get("ingredients_list") or "")
     ing = strip_recipe_refs(ing)
-    if APP_MODE != "rewrite":
+    if APP_MODE not in ("rewrite", "adapt"):
         return ing
     src_srv = normalize_servings(src_row.get("serves")) or 1
-    factor = target_servings_for(src_srv) / src_srv
+    factor = choose_target_servings(src_srv, ing) / src_srv
     if abs(factor - 1.0) > 1e-5:
         ing, _, _ = scale_recipe(ing, src_row.get("cooking_instructions") or "", factor)
     return ing
@@ -1528,7 +1596,8 @@ def validate_and_fix_rewrite(item: RewrittenRecipe, src_row: dict[str, Any]) -> 
 
     # 1. Порции
     src_srv = normalize_servings(src_row.get("serves")) or 1
-    expected_srv = target_servings_for(src_srv)
+    ing_for_srv = strip_recipe_refs(merge_broken_lines(src_row.get("ingredients_list") or ""))
+    expected_srv = choose_target_servings(src_srv, ing_for_srv)
     if item.servings != expected_srv:
         warns.append(f"servings: AI={item.servings}, ожидалось {expected_srv} (принудительно)")
         item.servings = expected_srv
@@ -1873,21 +1942,22 @@ def main() -> int:
                                 "mapping": mapping,
                                 "servings": src_srv,
                             }
-                        elif is_rewrite_pipeline and target_servings_for(src_srv) != src_srv:
-                            new_srv = target_servings_for(src_srv)
-                            factor = new_srv / src_srv
-                            if abs(factor - 1.0) > 1e-5:
-                                pr["ingredients_list"], pr["cooking_instructions"], scale_warns = scale_recipe(
-                                    pr["ingredients_list"], pr["cooking_instructions"], factor,
+                        elif is_rewrite_pipeline:
+                            new_srv = choose_target_servings(src_srv, pr["ingredients_list"])
+                            if new_srv != src_srv:
+                                factor = new_srv / src_srv
+                                if abs(factor - 1.0) > 1e-5:
+                                    pr["ingredients_list"], pr["cooking_instructions"], scale_warns = scale_recipe(
+                                        pr["ingredients_list"], pr["cooking_instructions"], factor,
+                                    )
+                                    for w in scale_warns:
+                                        LOGGER.warning(f"ID {row_key}: {w}")
+                                pr["serves"] = new_srv
+                                pr["scale_note"] = (
+                                    f"The system scaled this recipe from {src_srv} to {new_srv} servings "
+                                    f"(factor {factor:.2f}). Quantities are already final. Adjust any counts of pieces "
+                                    f"mentioned in the method (patties, skewers, muffins, tortillas, bars) by the same factor."
                                 )
-                                for w in scale_warns:
-                                    LOGGER.warning(f"ID {row_key}: {w}")
-                            pr["serves"] = new_srv
-                            pr["scale_note"] = (
-                                f"The system scaled this recipe from {src_srv} to {new_srv} servings "
-                                f"(factor {factor:.2f}). Quantities are already final. Adjust any counts of pieces "
-                                f"mentioned in the method (patties, skewers, muffins, tortillas, bars) by the same factor."
-                            )
 
                         prompt_rows.append(pr)
 
