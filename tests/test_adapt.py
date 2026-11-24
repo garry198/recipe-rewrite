@@ -51,13 +51,16 @@ ns["EXPECTED_CSV_HEADER"] = [
 ]
 exec(src[src.index("class RewrittenRecipe"): src.index("class SessionCostTracker")], ns)
 exec(src[src.index("def append_csv_batch"): src.index("def parse_rewrite_ids")], ns)
-exec(src[src.index("def normalize_servings"): src.index("def save_rewritten_recipe")], ns)
+exec(src[src.index("def normalize_servings"): src.index("def target_servings_for")], ns)
 
 build_adapt_select = ns["build_adapt_select"]
 build_adapt_insert_sql = ns["build_adapt_insert_sql"]
+build_rewrite_update_sql = ns["build_rewrite_update_sql"]
+build_translate_insert_sql = ns["build_translate_insert_sql"]
 validate_adapt_config = ns["validate_adapt_config"]
 save_adapted_recipe = ns["save_adapted_recipe"]
 append_csv_batch = ns["append_csv_batch"]
+append_ids_file = ns["append_ids_file"]
 normalize_servings = ns["normalize_servings"]
 RewrittenRecipe = ns["RewrittenRecipe"]
 
@@ -90,17 +93,42 @@ check("select force=True params order", params == ("US", "en_US", 5, "bread", 3)
 sql, params = build_adapt_select("US", "en_US", 2, force=True)
 check("select force=True without filters", "WHERE" not in sql and params == ("US", "en_US", 2), repr(params))
 
-# 2. INSERT SQL
+# 2. INSERT SQL (adapt, rewrite, translate)
 ins_sql = build_adapt_insert_sql(force=False)
 cols_part = ins_sql.split("(", 1)[1].split(")", 1)[0]
 vals_part = ins_sql.split("VALUES", 1)[1].split("(", 1)[1].split(")", 1)[0]
 cols = [c.strip() for c in cols_part.split(",")]
 vals = [v.strip() for v in vals_part.split(",")]
-check("INSERT cols == vals count", len(cols) == len(vals) == 14, f"{len(cols)} vs {len(vals)}")
+check("INSERT cols == vals count", len(cols) == len(vals) == 16, f"{len(cols)} vs {len(vals)}")
+check("INSERT has needs_reprice and dish_cost_serves", "needs_reprice" in cols and "dish_cost_serves" in cols)
 forbidden = {"calories_per_person", "proteins_per_person", "fats_per_person", "carbohydrates_per_person",
-             "netcarbs_per_person", "dish_cost_local", "nutrients_recalc_version", "needs_reprice"}
+             "netcarbs_per_person", "dish_cost_local", "nutrients_recalc_version"}
 check("INSERT excludes nutrition/cost cols", forbidden.isdisjoint(set(cols)))
-check("INSERT force=True has ON DUPLICATE KEY UPDATE", "ON DUPLICATE KEY UPDATE" in build_adapt_insert_sql(force=True) and "updated_at = NOW()" in build_adapt_insert_sql(force=True))
+
+force_sql = build_adapt_insert_sql(force=True)
+check(
+    "INSERT force=True resets nutrition/cost/version and sets needs_reprice/dish_cost_serves",
+    "ON DUPLICATE KEY UPDATE" in force_sql
+    and "updated_at = NOW()" in force_sql
+    and "dish_cost_serves = VALUES(dish_cost_serves)" in force_sql
+    and "needs_reprice = 1" in force_sql
+    and all(f"{col} = NULL" in force_sql for col in forbidden),
+)
+
+rew_sql = build_rewrite_update_sql()
+check(
+    "rewrite UPDATE has needs_reprice=1, dish_cost_serves=?, no nutrition/cost",
+    "needs_reprice = 1" in rew_sql and "dish_cost_serves = ?" in rew_sql
+    and all(col not in rew_sql for col in forbidden),
+)
+
+tr_sql = build_translate_insert_sql()
+check(
+    "translate INSERT/UPDATE has needs_reprice and dish_cost_serves, no dish_cost_local",
+    "needs_reprice" in tr_sql and "dish_cost_serves" in tr_sql
+    and "needs_reprice = 1" in tr_sql and "dish_cost_serves = VALUES(dish_cost_serves)" in tr_sql
+    and "dish_cost_local" not in tr_sql,
+)
 
 # 3. Validation
 for st in ("draft", "active", "archived"):
@@ -173,8 +201,9 @@ rid_out, status_out = save_adapted_recipe(
     FakeConnection(ok_cur), src_row, item, "gemini-3.8-flash", "US", "en_US", "active", force=False,
 )
 check("insert returns lastrowid and keeps original dish_name", rid_out == 999 and status_out == "OK" and ok_cur.executed[0][1][4] == "Original Keto Cake")
+check("insert passes dish_cost_serves == servings", ok_cur.executed[0][1][8] == 4 and ok_cur.executed[0][1][9] == 4)
 
-# DRY_RUN + no serves
+# DRY_RUN + no serves + ids file
 check("no serves detected for NULL/0", normalize_servings(None) is None and normalize_servings(0) is None)
 with tempfile.TemporaryDirectory() as tmp:
     csv_path = Path(tmp) / "adapt_log.csv"
@@ -187,6 +216,17 @@ with tempfile.TemporaryDirectory() as tmp:
     rows = list(csv.reader(csv_path.open("r", encoding="utf-8-sig"), delimiter=";"))
     check("CSV logs no serves and DRY_RUN with recipe_id/recipe_rewrite_id",
           len(rows) == 3 and rows[1][-3:] == ["10", "", "no serves"] and rows[2][-3:] == ["42", "", "DRY_RUN"])
+
+    dry_ids_file = Path(tmp) / "dry_ids.txt"
+    n_dry = append_ids_file(dry_ids_file, [])
+    check("append_ids_file does not create file for empty list (DRY_RUN/skipped)", n_dry == 0 and not dry_ids_file.exists())
+
+    live_ids_file = Path(tmp) / "rewrite_ids_adapt_test.txt"
+    n1 = append_ids_file(live_ids_file, [101, 102])
+    n2 = append_ids_file(live_ids_file, [103])
+    raw_bytes = live_ids_file.read_bytes()
+    check("append_ids_file writes UTF-8 LF without header or CRLF",
+          n1 == 2 and n2 == 1 and raw_bytes == b"101\n102\n103\n" and b"\r\n" not in raw_bytes)
 
 print(f"\nИТОГО adapt: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)
