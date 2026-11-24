@@ -74,6 +74,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
 REWRITE_IDS_RAW = os.getenv("REWRITE_IDS", "").strip()
 TRANSLATE_IDS_RAW = os.getenv("TRANSLATE_IDS", "").strip()
 ADAPT_IDS_RAW = os.getenv("ADAPT_IDS", "").strip()
+ADAPT_EXCLUDE_IDS_RAW = os.getenv("ADAPT_EXCLUDE_IDS", "").strip()
 ADAPT_LIMIT = int(os.getenv("ADAPT_LIMIT", "10"))
 ADAPT_DISH_TYPES_RAW = os.getenv("ADAPT_DISH_TYPES", "").strip()
 ADAPT_MARKET = os.getenv("ADAPT_MARKET", "US")
@@ -1116,13 +1117,20 @@ def normalize_servings(value: Any) -> int | None:
     return ivalue if ivalue > 0 else None
 
 
-def validate_adapt_config(status: str, limit: int) -> None:
+def validate_adapt_config(
+    status: str,
+    limit: int,
+    force: bool = False,
+    adapt_ids: Sequence[int] = (),
+) -> None:
     if status not in VALID_ADAPT_STATUSES:
         raise ValueError(
             f"Недопустимое значение ADAPT_STATUS={status!r}. Допустимо: {', '.join(VALID_ADAPT_STATUSES)}"
         )
     if limit <= 0:
         raise ValueError(f"ADAPT_LIMIT должен быть > 0, получено: {limit}")
+    if force and not adapt_ids:
+        raise ValueError("ADAPT_FORCE=1 требует явный ADAPT_IDS")
 
 
 def parse_dish_types(raw: str) -> list[str]:
@@ -1138,8 +1146,9 @@ def build_adapt_select(
     recipe_ids: Sequence[int] = (),
     dish_types: Sequence[str] = (),
     force: bool = False,
+    exclude_ids: Sequence[int] = (),
 ) -> tuple[str, tuple[Any, ...]]:
-    where_parts: list[str] = []
+    where_parts: list[str] = ["r.serves IS NOT NULL AND r.serves > 0"]
     params: list[Any] = [market, locale]
     if not force:
         where_parts.append("w.id IS NULL")
@@ -1147,11 +1156,15 @@ def build_adapt_select(
         placeholders = ", ".join("?" for _ in recipe_ids)
         where_parts.append(f"r.id IN ({placeholders})")
         params.extend(recipe_ids)
+    if exclude_ids:
+        placeholders = ", ".join("?" for _ in exclude_ids)
+        where_parts.append(f"r.id NOT IN ({placeholders})")
+        params.extend(exclude_ids)
     if dish_types:
         placeholders = ", ".join("?" for _ in dish_types)
         where_parts.append(f"r.dish_type IN ({placeholders})")
         params.extend(dish_types)
-    where_clause = f"WHERE {' AND '.join(where_parts)} " if where_parts else ""
+    where_clause = f"WHERE {' AND '.join(where_parts)} "
     sql = (
         "SELECT r.id AS recipe_id, r.dish_name, r.ingredients_list, r.cooking_instructions, "
         "r.serves, r.prep_time_minutes, r.cook_time_minutes, r.dish_type "
@@ -1173,8 +1186,11 @@ def fetch_adapt_rows(
     recipe_ids: Sequence[int] = (),
     dish_types: Sequence[str] = (),
     force: bool = False,
+    exclude_ids: Sequence[int] = (),
 ) -> list[dict[str, Any]]:
-    sql, params = build_adapt_select(market, locale, limit, recipe_ids, dish_types, force)
+    sql, params = build_adapt_select(
+        market, locale, limit, recipe_ids, dish_types, force, exclude_ids=exclude_ids,
+    )
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(sql, params)
@@ -1198,6 +1214,7 @@ def build_adapt_insert_sql(force: bool = False) -> str:
         base.strip()
         + """
         ON DUPLICATE KEY UPDATE
+            id = LAST_INSERT_ID(id),
             status = VALUES(status),
             dish_name_variant = VALUES(dish_name_variant),
             ingredients_list_variant = VALUES(ingredients_list_variant),
@@ -1290,6 +1307,7 @@ def build_translate_insert_sql() -> str:
         FROM recipe_rewrite
         WHERE id = ?
         ON DUPLICATE KEY UPDATE
+            id = LAST_INSERT_ID(id),
             dish_name_variant = VALUES(dish_name_variant),
             ingredients_list_variant = VALUES(ingredients_list_variant),
             cooking_instructions_variant = VALUES(cooking_instructions_variant),
@@ -1616,13 +1634,29 @@ def validate_locale_env_sync() -> None:
         )
 
 
+def format_adapt_exclude_line(
+    manual_ids: Sequence[int],
+    failed_ids: Sequence[int],
+    invalid_servings_ids: Sequence[int],
+    skipped_exists_ids: Sequence[int],
+) -> str | None:
+    all_ids = sorted(set(manual_ids) | set(failed_ids) | set(invalid_servings_ids) | set(skipped_exists_ids))
+    if not all_ids:
+        return None
+    return f"ADAPT_EXCLUDE_IDS={','.join(map(str, all_ids))}"
+
+
 def main() -> int:
     validate_locale_env_sync()
     is_rewrite_pipeline = APP_MODE in ("rewrite", "adapt")
     if APP_MODE == "adapt":
-        validate_adapt_config(ADAPT_STATUS, ADAPT_LIMIT)
+        adapt_ids_list = parse_rewrite_ids(ADAPT_IDS_RAW)
+        adapt_exclude_list = parse_rewrite_ids(ADAPT_EXCLUDE_IDS_RAW)
+        validate_adapt_config(ADAPT_STATUS, ADAPT_LIMIT, force=ADAPT_FORCE, adapt_ids=adapt_ids_list)
         rewrite_ids: list[int] = []
     else:
+        adapt_ids_list = []
+        adapt_exclude_list = []
         ids_raw = REWRITE_IDS_RAW if APP_MODE == "rewrite" else TRANSLATE_IDS_RAW
         rewrite_ids = parse_rewrite_ids(ids_raw)
         if not rewrite_ids:
@@ -1676,6 +1710,7 @@ def main() -> int:
 
     failed_ids, missing_in_db, invalid_servings_ids, manual_ids = [], [], [], []
     missing_qty_ids: list[int] = []
+    skipped_exists_ids: list[int] = []
     ids_out_file = IDS_OUT_DIR / f"rewrite_ids_{APP_MODE}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     total_saved_ids = 0
 
@@ -1685,9 +1720,10 @@ def main() -> int:
             ADAPT_MARKET,
             ADAPT_LOCALE,
             ADAPT_LIMIT,
-            recipe_ids=parse_rewrite_ids(ADAPT_IDS_RAW),
+            recipe_ids=adapt_ids_list,
             dish_types=parse_dish_types(ADAPT_DISH_TYPES_RAW),
             force=ADAPT_FORCE,
+            exclude_ids=adapt_exclude_list,
         )
         eligible_adapt_rows: list[dict[str, Any]] = []
         skipped_csv: list[tuple[dict, RewrittenRecipe | None, int | None, str]] = []
@@ -1989,6 +2025,8 @@ def main() -> int:
                             )
                             if save_status == "OK" and saved_id:
                                 batch_saved_ids.append(int(saved_id))
+                            elif save_status == "exists, skipped":
+                                skipped_exists_ids.append(int(rows_by_id[rid]["recipe_id"]))
                         else:
                             saved_id = save_rewritten_recipe(
                                 connection, int(rows_by_id[rid]["rewrite_row_id"]), rewritten, GEMINI_MODEL,
@@ -2073,6 +2111,12 @@ def main() -> int:
             f"{'TRANSLATE_IDS' if APP_MODE == 'translate' else ('ADAPT_IDS' if APP_MODE == 'adapt' else 'REWRITE_IDS')}="
             f"{','.join(map(str, sorted(set(failed_ids))))}"
         )
+    if APP_MODE == "adapt":
+        exclude_line = format_adapt_exclude_line(
+            manual_ids, failed_ids, invalid_servings_ids, skipped_exists_ids,
+        )
+        if exclude_line:
+            LOGGER.info(f"Для исключения при следующем запуске:\n{exclude_line}")
 
     return 2 if failed_ids else 0
 
