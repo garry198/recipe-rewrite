@@ -599,7 +599,9 @@ class OvenEntry(BaseModel):
 class LocaleOven(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tolerance_f: int = Field(ge=0)
+    convection_offset: int | None = None
     template: str
+    fallback_template: str = "{c}°C"
     entries: dict[int, OvenEntry]
 
 
@@ -758,21 +760,37 @@ def _convert_measure(m: re.Match, tail: str) -> str:
     return m.group(0)
 
 
-def _f_to_c(f: int) -> str:
+def _f_to_c_parts(f: int) -> tuple[int, str | None, int | None, bool]:
     for key, entry in OVEN_MAP.items():
         if abs(f - key) <= LOCALE.oven.tolerance_f:
-            if entry.th is not None:
-                return LOCALE.oven.template.format(c=entry.c, th=entry.th)
-            return f"{entry.c}°C"
-    c = (f - 32) * 5 / 9
-    return f"{round(c / 5) * 5 if c >= 100 else round(c)}°C"
+            c_conv = entry.c - LOCALE.oven.convection_offset if LOCALE.oven.convection_offset is not None else None
+            return entry.c, entry.th, c_conv, True
+    c_raw = (f - 32) * 5 / 9
+    c = round(c_raw / 5) * 5 if c_raw >= 100 else round(c_raw)
+    c_conv = c - LOCALE.oven.convection_offset if LOCALE.oven.convection_offset is not None else None
+    return c, None, c_conv, False
+
+
+def _format_oven(c_str: str, th: str | None, c_conv_str: str | None, in_table: bool) -> str:
+    if in_table and (th is not None or "{th}" not in LOCALE.oven.template):
+        return LOCALE.oven.template.format(c=c_str, th=th or "", c_conv=c_conv_str or "")
+    return LOCALE.oven.fallback_template.format(c=c_str, th=th or "", c_conv=c_conv_str or "")
+
+
+def _f_to_c(f: int) -> str:
+    c, th, c_conv, in_table = _f_to_c_parts(f)
+    return _format_oven(str(c), th, str(c_conv) if c_conv is not None else None, in_table)
 
 
 def _convert_temp(m: re.Match) -> str:
     a, b = int(m.group("a")), m.group("b")
     if b:
-        ca, cb = _f_to_c(a).split("°C")[0], _f_to_c(int(b))
-        return f"{ca}{LOCALE.number_format.range_sep}{cb}"
+        sep = LOCALE.number_format.range_sep
+        ca, _, ca_conv, in_a = _f_to_c_parts(a)
+        cb, th_b, cb_conv, in_b = _f_to_c_parts(int(b))
+        c_range = f"{ca}{sep}{cb}"
+        c_conv_range = f"{ca_conv}{sep}{cb_conv}" if (ca_conv is not None and cb_conv is not None) else None
+        return _format_oven(c_range, th_b, c_conv_range, in_a or in_b)
     return _f_to_c(a)
 
 
@@ -1392,7 +1410,24 @@ def build_batch_prompt(rows: Sequence[dict[str, Any]]) -> str:
 
 
 # ================= ОСНОВНОЙ ЦИКЛ =================
+def validate_locale_env_sync() -> None:
+    if APP_MODE != "translate":
+        return
+    mismatches = []
+    if TARGET_LANG != LOCALE.meta.lang.lower():
+        mismatches.append(f"TARGET_LANG={TARGET_LANG!r} != locale.meta.lang={LOCALE.meta.lang!r}")
+    if TARGET_MARKET != LOCALE.meta.market:
+        mismatches.append(f"TARGET_MARKET={TARGET_MARKET!r} != locale.meta.market={LOCALE.meta.market!r}")
+    if TARGET_CURRENCY != LOCALE.meta.currency:
+        mismatches.append(f"TARGET_CURRENCY={TARGET_CURRENCY!r} != locale.meta.currency={LOCALE.meta.currency!r}")
+    if mismatches:
+        raise ValueError(
+            f"Рассинхрон настроек с локалью {TARGET_LOCALE!r}: " + "; ".join(mismatches)
+        )
+
+
 def main() -> int:
+    validate_locale_env_sync()
     ids_raw = REWRITE_IDS_RAW if APP_MODE == "rewrite" else TRANSLATE_IDS_RAW
     rewrite_ids = parse_rewrite_ids(ids_raw)
 
