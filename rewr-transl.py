@@ -54,11 +54,57 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=False)
 
 # ================= НАСТРОЙКА ЛОГОВ =================
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    stream=sys.stdout,
-)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+CONSOLE_LOG_LEVEL = os.getenv("CONSOLE_LOG_LEVEL", LOG_LEVEL).upper()
+CONSOLE_VERBOSE = os.getenv("CONSOLE_VERBOSE", "0").lower() in {"1", "true", "yes", "on"}
+LOG_FILE_RAW = os.getenv("LOG_FILE", "logs/rewr-transl.log").strip()
+
+
+class ConsoleLogFilter(logging.Filter):
+    """Убирает из консоли по-рецептные строки '[API]/[CACHE] ID ... | Порции:' и повторяющиеся WARNING."""
+
+    _PER_RECIPE_RE = re.compile(r"^\[(?:API|CACHE)\]\s+ID\s+\d+\s*\|\s*Порции:")
+    _ID_NORM_RE = re.compile(r"\bID\s+\d+\b")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen_warnings: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR:
+            return True
+        msg = record.getMessage()
+        if self._PER_RECIPE_RE.search(msg):
+            return False
+        if record.levelno == logging.WARNING:
+            key = self._ID_NORM_RE.sub("ID <N>", msg)
+            if key in self._seen_warnings:
+                return False
+            self._seen_warnings.add(key)
+        return True
+
+
+_LOG_FORMAT = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+_root_logger = logging.getLogger()
+_root_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setLevel(getattr(logging, CONSOLE_LOG_LEVEL, logging.INFO))
+_console_handler.setFormatter(_LOG_FORMAT)
+if not CONSOLE_VERBOSE:
+    _console_handler.addFilter(ConsoleLogFilter())
+_root_logger.addHandler(_console_handler)
+
+if LOG_FILE_RAW:
+    _log_file_path = Path(LOG_FILE_RAW)
+    if not _log_file_path.is_absolute():
+        _log_file_path = BASE_DIR / _log_file_path
+    _log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    _file_handler = logging.FileHandler(_log_file_path, encoding="utf-8", delay=True)
+    _file_handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    _file_handler.setFormatter(_LOG_FORMAT)
+    _root_logger.addHandler(_file_handler)
+
 LOGGER = logging.getLogger("desserts_rewriter_update")
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
