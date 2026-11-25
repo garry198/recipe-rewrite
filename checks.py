@@ -4,7 +4,7 @@ from fractions import Fraction
 
 # Версия самих проверок — участвует в run_hash скрипта, чтобы при изменении
 # логики кэш инвалидировался. Поднимайте при любой правке этого файла.
-CHECKS_VERSION = "c10"
+CHECKS_VERSION = "c11"
 
 
 # ---------- 1. Проверка количеств в ингредиентах (рерайт) ----------
@@ -238,3 +238,24 @@ def style_check(ingredients: str, instructions: str, src_instructions: str = "")
             r"microwave", (src_instructions or "") + "\n" + ingredients, re.I):
         out.append("microwave нет в источнике")
     return out
+
+
+# ---------- 8. Расплывчатые единицы без веса ----------
+_VAGUE_UNIT_CHECK_RE = re.compile(
+    r"^\s*(?:(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛]|large|small|big)\s+)?"
+    r"(?:handfuls?|packs?|packets?|scoops?|bunch(?:es)?|bottles?)\b"
+    r"|^\s*(?:\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛])\s+cans?\b(?!\s*\(?\s*\d)"
+    r"|^\s*(?:[2-9]|\d{2,})\s+pinch(?:es)?\b"
+    r"|^\s*a\s+few\b",
+    re.IGNORECASE,
+)
+
+
+def vague_units_check(ingredients: str) -> list[str]:
+    """Строки ингредиентов, в которых остались расплывчатые единицы без веса/объёма."""
+    hits: list[str] = []
+    for raw in (ingredients or "").splitlines():
+        line = raw.strip()
+        if line and _VAGUE_UNIT_CHECK_RE.search(line):
+            hits.append(line)
+    return hits

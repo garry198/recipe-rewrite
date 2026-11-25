@@ -1,0 +1,69 @@
+# Справочник соответствий для расплывчатых единиц (US-меры, EN-адаптация).
+# Приоритет 1 в коде: если в скобках указан точный вес/объём (например "(100 g/ 3.5 oz)"), используется он.
+# Приоритет 2: первое совпадение (unit + item_regex) из этой таблицы.
+# Если соответствия нет — строка остаётся без изменений и пишется WARNING.
+
+rules:
+  # --- handful ---
+  - unit: handful
+    pattern: "(?i)\\b(?:arugula|rocket|watercress|spinach|kale|parsley|cilantro|basil|herbs?|lettuce|greens|mint|dill|chives|coriander)\\b"
+    amount: 1
+    target_unit: "cup"
+  - unit: handful
+    pattern: "(?i)\\b(?:nuts?|almonds?|walnuts?|pecans?|hazelnuts?|macadamia|cashews?|pistachios?|berries|blueberries|raspberries|strawberries|olives?)\\b"
+    amount: 0.25
+    target_unit: "cup"
+
+  # --- pack / packet ---
+  - unit: pack
+    pattern: "(?i)\\bfeta\\b"
+    amount: 8
+    target_unit: "oz"
+  - unit: pack
+    pattern: "(?i)\\b(?:cream\\s+cheese|mascarpone)\\b"
+    amount: 8
+    target_unit: "oz"
+  - unit: pack
+    pattern: "(?i)\\bbacon\\b"
+    amount: 12
+    target_unit: "oz"
+  - unit: pack
+    pattern: "(?i)\\bgelatin\\b"
+    amount: 1
+    target_unit: "tbsp"
+  - unit: pack
+    pattern: "(?i)\\byeast\\b"
+    amount: 2.25
+    target_unit: "tsp"
+  - unit: pack
+    pattern: "(?i)\\b(?:stevia|sweetener|erythritol|monk\\s+fruit)\\b"
+    amount: 1
+    target_unit: "tsp"
+
+  # --- bunch ---
+  - unit: bunch
+    pattern: "(?i)\\b(?:thyme|rosemary|oregano|sage|tarragon|mint|dill)\\b"
+    amount: 4
+    target_unit: "sprigs"
+  - unit: bunch
+    pattern: "(?i)\\b(?:cilantro|parsley|basil|wild\\s+garlic|chives|green\\s+onions?|scallions?|spinach|kale|arugula)\\b"
+    amount: 1
+    target_unit: "cup"
+
+  # --- scoop ---
+  - unit: scoop
+    pattern: "(?i)\\b(?:mct|collagen|protein|whey|powder)\\b"
+    amount: 2
+    target_unit: "tbsp"
+
+  # --- can (без размера) ---
+  - unit: can
+    pattern: "(?i)\\b(?:coconut\\s+milk|coconut\\s+cream|tomatoes|diced\\s+tomatoes|crushed\\s+tomatoes|tomato\\s+sauce)\\b"
+    amount: 14
+    target_unit: "oz"
+
+  # --- pinch (> 1) ---
+  - unit: pinch
+    pattern: ".*"
+    amount: 0.125
+    target_unit: "tsp"
