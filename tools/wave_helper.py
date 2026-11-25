@@ -87,6 +87,11 @@ def parse_run_log(log_text: str) -> dict[str, Any]:
     cost_line = ""
     account_line = ""
     ids_file_line = ""
+    stop_reason = ""
+    stop_processed: int | None = None
+    stop_remaining: int | None = None
+    stop_continue_line = ""
+    last_progress_line = ""
 
     for raw in (log_text or "").splitlines():
         line = raw.strip()
@@ -113,6 +118,20 @@ def parse_run_log(log_text: str) -> dict[str, Any]:
             account_line = line.split("|", 2)[-1].strip() if "|" in line else line
         if "Файл ID для cost-nutrients:" in line:
             ids_file_line = line.split("Файл ID для cost-nutrients:", 1)[1].strip()
+        if "Прогресс:" in line and "рецептов" in line:
+            last_progress_line = line.split("|", 2)[-1].strip() if "|" in line else line
+        m_stop = re.search(
+            r"Остановка волны:\s*причина=([^|]+)\|\s*обработано=(\d+)\s*\|\s*осталось=(\d+)",
+            line,
+        )
+        if m_stop:
+            stop_reason = m_stop.group(1).strip()
+            stop_processed = int(m_stop.group(2))
+            stop_remaining = int(m_stop.group(3))
+        if "Исчерпан месячный лимит Google" in line and not stop_reason:
+            stop_reason = "Исчерпан месячный лимит Google (spending cap)"
+        if "Необработанные ID для продолжения:" in line:
+            stop_continue_line = line.split("Необработанные ID для продолжения:", 1)[1].strip()
 
     return {
         "processed_ids": sorted(set(processed)),
@@ -122,6 +141,11 @@ def parse_run_log(log_text: str) -> dict[str, Any]:
         "cost_line": cost_line,
         "account_line": account_line,
         "ids_file_line": ids_file_line,
+        "stop_reason": stop_reason,
+        "stop_processed": stop_processed,
+        "stop_remaining": stop_remaining,
+        "stop_continue_line": stop_continue_line,
+        "last_progress_line": last_progress_line,
     }
 
 
@@ -155,9 +179,27 @@ def write_wave_summary(
         f"- Обработано рецептов: {len(parsed['processed_ids'])}",
         f"- Пропущено / замечания по отбору: {len(parsed['skipped'])}",
         f"- Файл ID для cost-nutrients: {parsed['ids_file_line'] or 'нет (DRY_RUN или 0 записей)'}",
+    ]
+    if parsed["last_progress_line"]:
+        lines.append(f"- Последний прогресс: {parsed['last_progress_line']}")
+
+    if parsed["stop_reason"]:
+        done_cnt = parsed["stop_processed"] if parsed["stop_processed"] is not None else len(parsed["processed_ids"])
+        rem_cnt = parsed["stop_remaining"] if parsed["stop_remaining"] is not None else 0
+        lines.extend([
+            "",
+            "## Остановка",
+            f"- Причина: **{parsed['stop_reason']}**",
+            f"- Обработано: {done_cnt}",
+            f"- Осталось: {rem_cnt}",
+        ])
+        if parsed["stop_continue_line"]:
+            lines.append(f"- Продолжить: `{parsed['stop_continue_line']}`")
+
+    lines.extend([
         "",
         "## Порции изменились",
-    ]
+    ])
     if parsed["servings_changed"]:
         lines.extend(f"- {s}" for s in parsed["servings_changed"])
     else:

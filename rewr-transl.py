@@ -2280,6 +2280,66 @@ def check_cost_limit(total_cost_usd: float, max_run_cost_usd: float) -> bool:
     return max_run_cost_usd > 0 and total_cost_usd >= max_run_cost_usd
 
 
+class SpendingCapExhaustedError(RuntimeError):
+    """Месячный лимит Google (spending cap / quota) исчерпан — повторы бесполезны."""
+
+
+SPENDING_CAP_MSG = "Исчерпан месячный лимит Google. Поднимите лимит и повторите ту же команду, кэш сохранён."
+
+
+def is_spending_cap_error(exc: BaseException) -> bool:
+    """Отличает исчерпание месячного лимита (spending cap / quota) от временного rate limit (429).
+
+    При сомнении возвращает False (считаем ошибку временной).
+    """
+    msg = str(exc).lower()
+    if not ("429" in msg or "resource_exhausted" in msg or "resource exhausted" in msg):
+        return False
+    hard_cap_markers = (
+        "spending cap",
+        "spending_cap",
+        "spend limit",
+        "monthly limit",
+        "monthly quota",
+        "billing",
+    )
+    if any(m in msg for m in hard_cap_markers):
+        return True
+    temp_rate_markers = (
+        "rate limit",
+        "requests per minute",
+        "tokens per minute",
+        "rpm",
+        "tpm",
+        "retry after",
+        "try again",
+    )
+    if any(m in msg for m in temp_rate_markers):
+        return False
+    quota_markers = (
+        "quota exceeded",
+        "exceeded your current quota",
+        "quota_exceeded",
+    )
+    return any(m in msg for m in quota_markers)
+
+
+def format_progress_line(
+    done_recipes: int,
+    total_recipes: int,
+    batch_number: int,
+    total_batches: int,
+    total_cost_usd: float,
+    skipped_count: int,
+) -> str:
+    return (
+        f"Прогресс: {done_recipes}/{total_recipes} рецептов | "
+        f"батч {batch_number}/{total_batches} | "
+        f"потрачено ${total_cost_usd:.2f} | "
+        f"пропущено {skipped_count}"
+    )
+
+
 def call_api_with_retries(
     call_fn,
     prompt_rows: Sequence[dict[str, Any]],
@@ -2310,6 +2370,9 @@ def call_api_with_retries(
             except Exception as exc:
                 last_exc = exc
                 tracker.failed_calls += 1
+                if is_spending_cap_error(exc):
+                    logger.error(f"[API] {SPENDING_CAP_MSG} (исходная ошибка: {exc})")
+                    raise SpendingCapExhaustedError(str(exc)) from exc
                 logger.warning(
                     f"[API] Попытка {attempt + 1}/{max_attempts} для ID {rids} завершилась ошибкой: {exc}"
                 )
@@ -2323,6 +2386,8 @@ def call_api_with_retries(
     all_ids = _row_ids(prompt_rows)
     try:
         return [(all_ids, _try_call(prompt_rows))]
+    except SpendingCapExhaustedError:
+        raise
     except Exception:
         if not (split_on_fail and len(prompt_rows) > 1):
             raise
@@ -2332,6 +2397,8 @@ def call_api_with_retries(
             s_id = _row_ids([single_row])
             try:
                 results.append((s_id, _try_call([single_row])))
+            except SpendingCapExhaustedError:
+                raise
             except Exception:
                 results.append((s_id, None))
         return results
@@ -2468,19 +2535,42 @@ def main() -> int:
         batches_rows = []
         batches = [rewrite_ids[i:i + FETCH_SIZE] for i in range(0, len(rewrite_ids), FETCH_SIZE)]
 
+    total_recipes = sum(len(b) for b in batches)
+    processed_recipes_total = 0
+    consecutive_failed_batches = 0
+    max_consecutive_failed_batches = 3
+    stop_exit_code = 0
+    retry_var = "TRANSLATE_IDS" if APP_MODE == "translate" else ("ADAPT_IDS" if APP_MODE == "adapt" else "REWRITE_IDS")
+
+    def _skipped_total() -> int:
+        return len(
+            set(missing_in_db)
+            | set(invalid_servings_ids)
+            | set(manual_ids)
+            | set(missing_qty_ids)
+            | set(recipe_ref_ids)
+            | set(skipped_exists_ids)
+        )
+
     try:
         for batch_number, batch_ids in enumerate(batches, start=1):
             if check_cost_limit(SESSION_TRACKER.total_cost_usd, MAX_RUN_COST_USD):
                 remaining_ids = [rid for b in batches[batch_number - 1:] for rid in b]
-                retry_var = "TRANSLATE_IDS" if APP_MODE == "translate" else ("ADAPT_IDS" if APP_MODE == "adapt" else "REWRITE_IDS")
                 LOGGER.error(
                     f"Достигнут лимит расхода MAX_RUN_COST_USD=${MAX_RUN_COST_USD:.4f} "
                     f"(накоплено ${SESSION_TRACKER.total_cost_usd:.4f}). Остановка до следующего батча."
+                )
+                LOGGER.error(
+                    f"Остановка волны: причина=MAX_RUN_COST_USD | "
+                    f"обработано={processed_recipes_total} | осталось={len(remaining_ids)}"
                 )
                 LOGGER.error(f"Необработанные ID для продолжения: {retry_var}={','.join(map(str, remaining_ids))}")
                 break
             LOGGER.info(f"--- Батч {batch_number}/{len(batches)} | ID: {batch_ids} ---")
             api_called, api_failed = False, False
+            spending_cap_hit = False
+            batch_api_ok = 0
+            api_requests: list[int] = []
             eligible_ids: list[int] = []
             result_by_id: dict[int, RewrittenRecipe] = {}
             cache_hits: dict[int, RewrittenRecipe] = {}
@@ -2504,9 +2594,14 @@ def main() -> int:
                         eligible_ids.append(rid)
 
                 if not eligible_ids:
+                    LOGGER.info(
+                        format_progress_line(
+                            min(total_recipes, processed_recipes_total + _skipped_total()),
+                            total_recipes, batch_number, len(batches),
+                            SESSION_TRACKER.total_cost_usd, _skipped_total(),
+                        )
+                    )
                     continue
-
-                api_requests: list[int] = []
 
                 for rid in list(eligible_ids):
                     if is_rewrite_pipeline and SKIP_MULTI_VARIANT:
@@ -2755,10 +2850,16 @@ def main() -> int:
 
                                 valid_results.append(item)
 
+                    except SpendingCapExhaustedError:
+                        api_failed = True
+                        spending_cap_hit = True
+                        valid_results = []
+                        failed_ids.extend([rid for rid in api_requests if rid not in failed_ids])
                     except Exception:
                         api_failed = True
                         raise
 
+                    batch_api_ok = len(valid_results)
                     for item in valid_results:
                         fingerprint = row_fingerprint(rows_by_id[item.rewrite_row_id])
                         cache_id = f"r3_{item.rewrite_row_id}" if APP_MODE == "adapt" else str(item.rewrite_row_id)
@@ -2840,13 +2941,57 @@ def main() -> int:
                 except Exception as csv_exc:
                     LOGGER.error(f"БД обновлена, но CSV не записан: {csv_exc}")
 
+                processed_recipes_total += len(result_by_id)
+
             except Exception as exc:
+                api_failed = True
                 LOGGER.exception(f"Критическая ошибка в батче {batch_number}: {exc}")
                 failed_ids.extend(
                     [rid for rid in eligible_ids if rid not in result_by_id and rid not in failed_ids]
                 )
                 if not DRY_RUN:
                     connection.rollback()
+
+            LOGGER.info(
+                format_progress_line(
+                    min(total_recipes, processed_recipes_total + _skipped_total()),
+                    total_recipes, batch_number, len(batches),
+                    SESSION_TRACKER.total_cost_usd, _skipped_total(),
+                )
+            )
+
+            if spending_cap_hit:
+                remaining_ids = [rid for rid in api_requests if rid not in result_by_id] + [
+                    rid for b in batches[batch_number:] for rid in b
+                ]
+                LOGGER.error(SPENDING_CAP_MSG)
+                LOGGER.error(
+                    f"Остановка волны: причина=Исчерпан месячный лимит Google (spending cap) | "
+                    f"обработано={processed_recipes_total} | осталось={len(remaining_ids)}"
+                )
+                if remaining_ids:
+                    LOGGER.error(f"Необработанные ID для продолжения: {retry_var}={','.join(map(str, remaining_ids))}")
+                stop_exit_code = 2
+                break
+
+            if api_called:
+                if api_failed and batch_api_ok == 0:
+                    consecutive_failed_batches += 1
+                else:
+                    consecutive_failed_batches = 0
+
+                if consecutive_failed_batches >= max_consecutive_failed_batches:
+                    remaining_ids = [rid for b in batches[batch_number:] for rid in b]
+                    LOGGER.error(
+                        f"Остановка волны: причина={max_consecutive_failed_batches} подряд неудавшихся батча API | "
+                        f"обработано={processed_recipes_total} | осталось={len(remaining_ids)}"
+                    )
+                    if remaining_ids:
+                        LOGGER.error(
+                            f"Необработанные ID для продолжения: {retry_var}={','.join(map(str, remaining_ids))}"
+                        )
+                    stop_exit_code = 2
+                    break
 
             if api_called and SLEEP_BETWEEN_REQUESTS > 0 and batch_number < len(batches):
                 time.sleep(SLEEP_BETWEEN_REQUESTS * (2 if api_failed else 1))
@@ -2955,7 +3100,7 @@ def main() -> int:
         if exclude_line:
             LOGGER.info(f"Для исключения при следующем запуске:\n{exclude_line}")
 
-    return 2 if failed_ids else 0
+    return stop_exit_code if stop_exit_code else (2 if failed_ids else 0)
 
 
 if __name__ == "__main__":

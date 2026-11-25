@@ -28,9 +28,10 @@
 - r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (**слита** в `main`)
 - r11d — обновление стартовых файлов для ИИ (`STATE.md`, `AGENTS.md`, `WORKFLOW.md`) (**слита** в `main`)
 - r12 — расплывчатые единицы без веса (`locales/vague_units.yaml`, `v3_6`, `UNITS u3`, `CHECKS c11`) и защита выпечки в форме (`RESCALE_SKIP_BAKEWARE=1`, `SCALE s23`) (**слита** в `main`)
-- r13 — запуск волны одной командой (`tools/run_wave.ps1`, `wave_exclude.txt`, `logs/waves/<ts>/summary.md`) (в `worker/r13`)
-- r14 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
-- r15 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+- r13 — запуск волны одной командой (`tools/run_wave.ps1`, `wave_exclude.txt`, `logs/waves/<ts>/summary.md`) (**слита** в `main`)
+- r14 — прогресс волны в консоли (`run_wave.ps1` + строка прогресса по рецептам) и быстрый отказ при исчерпании месячного лимита Google / 3 подряд неудавшихся батчах (в `worker/r14`)
+- r15 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
+- r16 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
 ## Оперативный статус (на 2026-11-24)
 

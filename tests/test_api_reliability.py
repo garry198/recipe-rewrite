@@ -26,6 +26,9 @@ exec(src[src.index("def check_cost_limit"): src.index("def main()")], ns)
 
 call_api_with_retries = ns["call_api_with_retries"]
 check_cost_limit = ns["check_cost_limit"]
+SpendingCapExhaustedError = ns["SpendingCapExhaustedError"]
+is_spending_cap_error = ns["is_spending_cap_error"]
+format_progress_line = ns["format_progress_line"]
 
 fails: list[str] = []
 
@@ -104,6 +107,48 @@ check("MAX_RUN_COST_USD=0 disables cost limit",
       check_cost_limit(99.0, 0.0) is False)
 check("MAX_RUN_COST_USD stops when total_cost_usd >= limit",
       check_cost_limit(0.049, 0.05) is False and check_cost_limit(0.05, 0.05) is True and check_cost_limit(0.08, 0.05) is True)
+
+# 5. Распознавание spending cap vs временного 429 rate limit
+check("is_spending_cap_error detects 429 spending cap",
+      is_spending_cap_error(RuntimeError("429 RESOURCE_EXHAUSTED: Monthly spending cap exceeded")) is True)
+check("is_spending_cap_error detects 429 quota exceeded / billing",
+      is_spending_cap_error(RuntimeError("429 RESOURCE_EXHAUSTED: You exceeded your current quota, check billing.")) is True)
+check("is_spending_cap_error treats 429 RPM rate limit as temporary",
+      is_spending_cap_error(RuntimeError("429 RESOURCE_EXHAUSTED: rate limit exceeded (RPM)")) is False)
+check("is_spending_cap_error treats ambiguous 429 as temporary",
+      is_spending_cap_error(RuntimeError("429 RESOURCE_EXHAUSTED")) is False)
+check("is_spending_cap_error ignores 503",
+      is_spending_cap_error(RuntimeError("503 Service Unavailable")) is False)
+
+# 6. Быстрый отказ при spending cap: 1 попытка, без sleep и без дробления батча
+tracker4 = SimpleNamespace(failed_calls=0)
+sleeps4: list[float] = []
+calls4 = {"n": 0}
+
+
+def fail_spending_cap(prompt_text: str) -> str:
+    calls4["n"] += 1
+    raise RuntimeError("429 RESOURCE_EXHAUSTED: Your project has reached its monthly spending cap.")
+
+
+cap_raised = False
+try:
+    call_api_with_retries(
+        fail_spending_cap, rows_2, fake_build_prompt,
+        retries=2, backoff=[5.0, 20.0], split_on_fail=True,
+        tracker=tracker4, sleep_fn=sleeps4.append, logger=_test_logger,
+    )
+except SpendingCapExhaustedError:
+    cap_raised = True
+
+check("spending cap aborts immediately without retries, sleep, or batch split",
+      cap_raised and calls4["n"] == 1 and tracker4.failed_calls == 1 and sleeps4 == [])
+
+# 7. Формат строки прогресса
+prog = format_progress_line(30, 100, 10, 34, 0.071, 2)
+check("format_progress_line matches required format",
+      prog == "Прогресс: 30/100 рецептов | батч 10/34 | потрачено $0.07 | пропущено 2",
+      repr(prog))
 
 print(f"\nИТОГО api_reliability: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)

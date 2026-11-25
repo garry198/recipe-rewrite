@@ -78,7 +78,12 @@ try {
     $ErrorActionPreference = "Continue"
     Push-Location $repoRoot
     try {
-        python rewr-transl.py 2>&1 | Out-File $runLog -Encoding utf8
+        if (Test-Path $runLog) { Remove-Item $runLog -Force }
+        python -u rewr-transl.py 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            $line | Out-File -FilePath $runLog -Append -Encoding utf8
+        }
         $exitCode = $LASTEXITCODE
     } finally {
         Pop-Location
