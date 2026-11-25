@@ -27,9 +27,10 @@
 - r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`) (**слита** в `main`)
 - r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (**слита** в `main`)
 - r11d — обновление стартовых файлов для ИИ (`STATE.md`, `AGENTS.md`, `WORKFLOW.md`) (**слита** в `main`)
-- r12 — расплывчатые единицы без веса (`locales/vague_units.yaml`, `v3_6`, `UNITS u3`, `CHECKS c11`) и защита выпечки в форме (`RESCALE_SKIP_BAKEWARE=1`, `SCALE s23`) (в `worker/r12`)
-- r13 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
-- r14 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+- r12 — расплывчатые единицы без веса (`locales/vague_units.yaml`, `v3_6`, `UNITS u3`, `CHECKS c11`) и защита выпечки в форме (`RESCALE_SKIP_BAKEWARE=1`, `SCALE s23`) (**слита** в `main`)
+- r13 — запуск волны одной командой (`tools/run_wave.ps1`, `wave_exclude.txt`, `logs/waves/<ts>/summary.md`) (в `worker/r13`)
+- r14 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
+- r15 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
 ## Оперативный статус (на 2026-11-24)
 
@@ -50,9 +51,11 @@
 - DE на живом API не пробовали.
 
 ## Как проходит волна
-1. В `.env` задать: `APP_MODE=adapt`, `ADAPT_IDS` (или `ADAPT_LIMIT`), `ADAPT_FORCE=0/1`, `ADAPT_EXCLUDE_IDS`, `RESCALE_TARGET_SERVINGS=4`, `GEMINI_ACCOUNT_LABEL=main`, `DRY_RUN=1`.
-2. Запустить `DRY_RUN=1` (платный, результаты сохраняются в кэш) → проверить `logs/force_report_*.md` → переключить `DRY_RUN=0`, боевой запуск из кэша.
-3. Записанные `recipe_rewrite.id` взять из `logs/rewrite_ids_adapt_<ts>.txt` и отправить в `cost-nutrients` через `_hub`.
+1. Dry-run (по умолчанию `DRY_RUN=1`, `.env` не правится, исключения берутся из `wave_exclude.txt`):
+   `.\tools\run_wave.ps1 -Ids "2248,2250,..."` (или `-IdsFile wave_a.txt` / `-Limit 10`, при переделке добавить `-Force`, при другом размере порций `-Scale N`).
+2. Проверить `logs\waves\<ts>\summary.md` (и `logs\force_report_*.md` при `-Force`), затем выполнить боевой запуск из кэша:
+   `.\tools\run_wave.ps1 -Ids "2248,2250,..." -Live` (при отсутствии предшествующего dry-run скрипт запросит подтверждение `y/N`).
+3. Записанные `recipe_rewrite.id` взять из `logs/rewrite_ids_adapt_<ts>.txt` (путь указан в `summary.md`) и отправить в `cost-nutrients` через `_hub`.
 4. `cost-nutrients` считает КБЖУ и цену (`needs_reprice` → `0`).
 5. Claude проверяет КБЖУ и цены; активацию (`UPDATE status='active'`) и правки текста выполняет только владелец.
 6. Откат `FORCE`: `tools/rollback_force.py` по `backups/recipe_rewrite_force_<ts>.jsonl` (`dry-run` по умолчанию, `--apply` для записи).

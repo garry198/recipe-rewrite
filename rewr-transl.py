@@ -51,7 +51,7 @@ except ImportError as _e:
     sys.exit(1)
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", override=False)
 
 # ================= НАСТРОЙКА ЛОГОВ =================
 logging.basicConfig(
