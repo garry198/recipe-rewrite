@@ -1,4 +1,4 @@
-# Текущее состояние (baseline = rewr-transl_22, CHECKS c10)
+# Текущее состояние (baseline = rewr-transl_22, CHECKS c11)
 
 ## Что работает
 - Рерайт EN: промпт v3_5 + детерминированная пред/постобработка (масштабирование к 4 порциям при >8, склейка строк,
@@ -26,9 +26,10 @@
 - r11 — надёжность процесса: тесты перед слиянием (`tools/test_suites.ps1`), повтор API + split, лимит `MAX_RUN_COST_USD` (**слита** в `main`)
 - r11b — регламент сдачи (`AGENTS.md`, шаблон `worker_notes.md`, `merge_resolution.patch`) и эталонный набор (`docs/REFERENCE_IDS.md`) (**слита** в `main`)
 - r11c — защита FORCE: `FORCE_KEEP_DISH_NAME=1`, `RESCALE_SKIP_PAREN_QTY=1`, `SCALE_VERSION s22` (сброс кэша) (**слита** в `main`)
-- r11d — обновление стартовых файлов для ИИ (`STATE.md`, `AGENTS.md`, `WORKFLOW.md`)
-- r12 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
-- r13 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
+- r11d — обновление стартовых файлов для ИИ (`STATE.md`, `AGENTS.md`, `WORKFLOW.md`) (**слита** в `main`)
+- r12 — расплывчатые единицы без веса (`locales/vague_units.yaml`, `v3_6`, `UNITS u3`, `CHECKS c11`) и защита выпечки в форме (`RESCALE_SKIP_BAKEWARE=1`, `SCALE s23`) (в `worker/r12`)
+- r13 — кэш: SQLite с `policy-version` (идея из ветки Book Pipeline, `rescale_cache.py`)
+- r14 — таксономия единиц в YAML (идея из `units.yaml`/`measures.py`), строгие проверки дробных штучных позиций
 
 ## Оперативный статус (на 2026-11-24)
 
