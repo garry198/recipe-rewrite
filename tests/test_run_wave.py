@@ -85,5 +85,47 @@ with tempfile.TemporaryDirectory() as tmp:
           and "4423" in s_text
           and "rewrite_ids_adapt_20261125_130000.txt" in s_text)
 
+    # 7. summary.md при досрочной остановке (spending cap и 3 подряд неудавшихся батча)
+    run_log_cap = tmp_path / "run_cap.log"
+    run_log_cap.write_text(
+        "2026-11-25 14:00:00 | INFO | [API] ID 4127 | Порции: 12 -> 6\n"
+        "2026-11-25 14:00:01 | INFO | Прогресс: 12/100 рецептов | батч 4/34 | потрачено $0.03 | пропущено 0\n"
+        "2026-11-25 14:00:02 | ERROR | Исчерпан месячный лимит Google. Поднимите лимит и повторите ту же команду, кэш сохранён.\n"
+        "2026-11-25 14:00:02 | ERROR | Остановка волны: причина=Исчерпан месячный лимит Google (spending cap) | обработано=12 | осталось=88\n"
+        "2026-11-25 14:00:02 | ERROR | Необработанные ID для продолжения: ADAPT_IDS=5001,5002\n",
+        encoding="utf-8",
+    )
+    sum_cap = tmp_path / "summary_cap.md"
+    wh.write_wave_summary(sum_cap, run_log_cap, env_live, exit_code=2, ts="20261125_140000")
+    cap_text = sum_cap.read_text(encoding="utf-8")
+    check("summary.md reflects spending cap stop with processed, remaining, and reason",
+          "## Остановка" in cap_text
+          and "spending cap" in cap_text
+          and "Обработано: 12" in cap_text
+          and "Осталось: 88" in cap_text
+          and "ADAPT_IDS=5001,5002" in cap_text
+          and "Прогресс: 12/100 рецептов" in cap_text)
+
+    run_log_3fail = tmp_path / "run_3fail.log"
+    run_log_3fail.write_text(
+        "2026-11-25 14:05:00 | ERROR | Остановка волны: причина=3 подряд неудавшихся батча API | обработано=6 | осталось=24\n",
+        encoding="utf-8",
+    )
+    sum_3fail = tmp_path / "summary_3fail.md"
+    wh.write_wave_summary(sum_3fail, run_log_3fail, env_dry, exit_code=2, ts="20261125_140500")
+    fail3_text = sum_3fail.read_text(encoding="utf-8")
+    check("summary.md reflects 3 consecutive failed batches stop",
+          "## Остановка" in fail3_text
+          and "3 подряд неудавшихся батча API" in fail3_text
+          and "Обработано: 6" in fail3_text
+          and "Осталось: 24" in fail3_text)
+
+    # 8. run_wave.ps1 не использует Tee-Object и пишет в UTF-8 через ForEach-Object
+    ps1_text = (HERE / "tools" / "run_wave.ps1").read_text(encoding="utf-8-sig")
+    check("run_wave.ps1 streams output via ForEach-Object without Tee-Object",
+          "Tee-Object" not in ps1_text
+          and "ForEach-Object" in ps1_text
+          and "Out-File -FilePath $runLog -Append -Encoding utf8" in ps1_text)
+
 print(f"\nИТОГО run_wave: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)
