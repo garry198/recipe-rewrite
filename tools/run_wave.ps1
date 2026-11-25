@@ -71,6 +71,12 @@ $prep.env.PSObject.Properties | ForEach-Object {
     $envMap[$k] = $v
     [Environment]::SetEnvironmentVariable($k, $v, "Process")
 }
+# В run_wave.ps1 полный лог идёт в run.log, а консоль фильтруется в ForEach-Object
+foreach ($extraK in @("CONSOLE_VERBOSE", "LOG_FILE")) {
+    $savedEnv[$extraK] = [Environment]::GetEnvironmentVariable($extraK, "Process")
+}
+[Environment]::SetEnvironmentVariable("CONSOLE_VERBOSE", "1", "Process")
+[Environment]::SetEnvironmentVariable("LOG_FILE", "", "Process")
 
 $exitCode = 0
 try {
@@ -81,8 +87,10 @@ try {
         if (Test-Path $runLog) { Remove-Item $runLog -Force }
         python -u rewr-transl.py 2>&1 | ForEach-Object {
             $line = $_.ToString()
-            Write-Host $line
             $line | Out-File -FilePath $runLog -Append -Encoding utf8
+            if ($line -match "\| ERROR \|" -or $line -match "Прогресс:\s*\d+/\d+\s+рецептов" -or $line -match "Остановка волны:") {
+                Write-Host $line
+            }
         }
         $exitCode = $LASTEXITCODE
     } finally {
@@ -99,7 +107,27 @@ if (-not $Live -and $exitCode -eq 0) {
     Set-Content -Path $dryMarker -Value $ts -Encoding utf8
 }
 
+$envJsonPath = Join-Path $waveDir "env.json"
 $envJsonStr = ($envMap | ConvertTo-Json -Compress)
-python $helper summarize --summary $summaryMd --log $runLog --env-json $envJsonStr --exit-code $exitCode --ts $ts
-Write-Host "Готово (exit $exitCode). Сводка: $summaryMd | Лог: $runLog"
+[System.IO.File]::WriteAllText($envJsonPath, $envJsonStr, (New-Object System.Text.UTF8Encoding($false)))
+
+$prevEAPSum = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$sumOutput = python $helper summarize --summary $summaryMd --log $runLog --env-file $envJsonPath --exit-code $exitCode --ts $ts 2>&1
+$sumExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEAPSum
+
+if ($sumExit -ne 0) {
+    $errReason = (($sumOutput | ForEach-Object { $_.ToString() }) -join " ").Trim()
+    Write-Host "Сводка не создана: $errReason"
+    if ($exitCode -eq 0) { $exitCode = $sumExit }
+    exit $exitCode
+}
+
+$shortSummary = (($sumOutput | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+if ($shortSummary) {
+    Write-Host $shortSummary
+} else {
+    Write-Host "Готово (exit $exitCode). Сводка: $summaryMd"
+}
 exit $exitCode

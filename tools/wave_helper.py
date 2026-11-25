@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -224,6 +225,33 @@ def write_wave_summary(
     return summary_path
 
 
+def load_env_file(path: Path) -> dict[str, str]:
+    """Читает JSON-объект env из файла (UTF-8 без BOM или с BOM)."""
+    if not path.is_file():
+        raise ValueError(f"Файл env не найден: {path}")
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(f"Некорректный JSON в {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Ожидался JSON-объект в {path}, получено: {type(data).__name__}")
+    return {str(k): "" if v is None else str(v) for k, v in data.items()}
+
+
+def format_console_summary(parsed: dict[str, Any], summary_path: Path, exit_code: int) -> str:
+    """Короткая итоговая строка для консоли волны."""
+    done_cnt = len(parsed.get("processed_ids", []))
+    skip_cnt = len(parsed.get("skipped", []))
+    cost_raw = parsed.get("cost_line") or ""
+    m_cost = re.search(r"\$[0-9]+(?:\.[0-9]+)?(?:\s*USD)?", cost_raw)
+    cost_short = m_cost.group(0) if m_cost else (cost_raw or "$0.00")
+    return (
+        f"Итог (exit {exit_code}): обработано {done_cnt} | пропущено {skip_cnt} | "
+        f"расход {cost_short} | сводка: {summary_path}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -241,7 +269,8 @@ def main() -> int:
     p_sum = sub.add_parser("summarize")
     p_sum.add_argument("--summary", type=Path, required=True)
     p_sum.add_argument("--log", type=Path, required=True)
-    p_sum.add_argument("--env-json", required=True)
+    p_sum.add_argument("--env-file", type=Path, default=None)
+    p_sum.add_argument("--env-json", default="")
     p_sum.add_argument("--exit-code", type=int, required=True)
     p_sum.add_argument("--ts", required=True)
 
@@ -259,8 +288,22 @@ def main() -> int:
         return 0
 
     if args.cmd == "summarize":
-        env = json.loads(args.env_json)
+        try:
+            if args.env_file is not None:
+                env = load_env_file(args.env_file)
+            elif args.env_json:
+                data = json.loads(args.env_json)
+                if not isinstance(data, dict):
+                    raise ValueError("Ожидался JSON-объект в --env-json")
+                env = {str(k): "" if v is None else str(v) for k, v in data.items()}
+            else:
+                raise ValueError("Не указан --env-file (или --env-json)")
+        except Exception as exc:
+            print(f"Ошибка чтения env: {exc}", file=sys.stderr)
+            return 1
         write_wave_summary(args.summary, args.log, env, args.exit_code, args.ts)
+        log_text = args.log.read_text(encoding="utf-8-sig") if args.log.is_file() else ""
+        print(format_console_summary(parse_run_log(log_text), args.summary, args.exit_code))
         return 0
 
     return 1
