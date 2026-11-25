@@ -41,6 +41,7 @@ try:
         recipe_ref_check,
         strip_recipe_refs,
         style_check,
+        vague_units_check,
     )
 except ImportError as _e:
     # ImportError бывает не только «файла нет»: часто в найденном checks.py нет нужной функции (старая версия).
@@ -99,6 +100,7 @@ RESCALE_MAX_DIVISOR = float(os.getenv("RESCALE_MAX_DIVISOR", "3"))
 RESCALE_ONLY_IF_MORE_THAN = int(os.getenv("RESCALE_ONLY_IF_MORE_THAN", "8"))
 RESCALE_SMART = os.getenv("RESCALE_SMART", "1").lower() in {"1", "true", "yes", "on"}
 RESCALE_SKIP_PAREN_QTY = os.getenv("RESCALE_SKIP_PAREN_QTY", "1").lower() in {"1", "true", "yes", "on"}
+RESCALE_SKIP_BAKEWARE = os.getenv("RESCALE_SKIP_BAKEWARE", "1").lower() in {"1", "true", "yes", "on"}
 RESCALE_CANDIDATES = [
     int(x.strip()) for x in os.getenv("RESCALE_CANDIDATES", "4,6,8,12,16,24,32").split(",") if x.strip()
 ]
@@ -124,7 +126,7 @@ TARGET_CURRENCY = os.getenv("TARGET_CURRENCY", "EUR")
 if APP_MODE == "translate":
     SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE_TRANSLATE", "prompts/desserts_translate_prompt_fr_v4.txt")
 else:
-    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "prompts/desserts_rewrite_prompt_v3_5.txt")
+    SYSTEM_INSTRUCTION_FILE = BASE_DIR / os.getenv("PROMPT_FILE", "prompts/desserts_rewrite_prompt_v3_6.txt")
 
 CSV_LOG_FILE = BASE_DIR / os.getenv("CSV_LOG_FILE", "rewrite_update_log.csv")
 IDS_OUT_DIR = BASE_DIR / os.getenv("IDS_OUT_DIR", "logs")
@@ -132,8 +134,8 @@ BACKUPS_DIR = BASE_DIR / os.getenv("BACKUPS_DIR", "backups")
 CACHE_DIR = BASE_DIR / "gemini_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-UNITS_VERSION = "u2"
-SCALE_VERSION = "s22"
+UNITS_VERSION = "u3"
+SCALE_VERSION = "s23"
 
 EXPECTED_CSV_HEADER = [
     "Rewrite Row ID", "Recipe ID", "Previous Dish Name", "Rewritten Dish Name",
@@ -1723,10 +1725,35 @@ def find_paren_only_qty_line(ingredients: str) -> str | None:
     return None
 
 
-def choose_target_servings(src_srv: int, ingredients: str, row_id: int | None = None) -> int:
-    """Выбор целевого числа порций: избегает дробных счётных яиц и отключает масштабирование при количестве только в скобках."""
+_BAKEWARE_RE = re.compile(
+    r"\b(?:loaf\s+pan|springform(?:\s+pan)?|baking\s+dish|cake\s+pan|muffin\s+tin|"
+    r"9\s*x\s*13|8\s*x\s*8|9\s*x\s*5|8\s*x\s*4)\b",
+    re.IGNORECASE,
+)
+
+
+def find_bakeware_match(instructions: str) -> str | None:
+    m = _BAKEWARE_RE.search(instructions or "")
+    return m.group(0) if m else None
+
+
+def choose_target_servings(
+    src_srv: int,
+    ingredients: str,
+    row_id: int | None = None,
+    instructions: str = "",
+) -> int:
+    """Выбор целевого числа порций: избегает дробных яиц, отключает масштабирование при скобках и выпечке в форме."""
     if RESCALE_TARGET_SERVINGS <= 0 or src_srv <= RESCALE_ONLY_IF_MORE_THAN:
         return src_srv
+    if globals().get("RESCALE_SKIP_BAKEWARE", True) and instructions:
+        bw = find_bakeware_match(instructions)
+        if bw and target_servings_for(src_srv) < src_srv:
+            lg = globals().get("LOGGER")
+            if lg is not None:
+                prefix = f"ID {row_id}: " if row_id is not None else ""
+                lg.warning(f"{prefix}выпечка в форме ({bw}), масштабирование отключено")
+            return src_srv
     if globals().get("RESCALE_SKIP_PAREN_QTY", True):
         paren_line = find_paren_only_qty_line(ingredients)
         if paren_line:
@@ -1841,18 +1868,177 @@ def multi_variant_dups(ingredients: str) -> dict[str, int]:
     return {k: v for k, v in cnt.items() if v > 1 and not _COMMON_DUP_NAMES.search(k)}
 
 
+_VAGUE_UNIT_LINE_RE = re.compile(
+    r"^\s*(?:(?P<qty>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛])\s+)?"
+    r"(?:(?P<size>large|small|big)\s+)?"
+    r"(?P<unit>handfuls?|packs?|packets?|scoops?|bunch(?:es)?|bottles?|cans?|pinch(?:es)?|a\s+few)\b"
+    r"(?:\s+of\b)?\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_PAREN_US_MEASURE_RE = re.compile(
+    r"\([^)\n]*?(?P<n>\d+(?:\.\d+)?)\s*(?P<u>oz|fl\.?\s*oz|lb|lbs|cups?|tbsp|tsp)\b[^)\n]*?\)",
+    re.IGNORECASE,
+)
+_PAREN_METRIC_ONLY_RE = re.compile(
+    r"\([^)\n]*?(?P<n>\d+(?:\.\d+)?)\s*(?P<u>g|grams?|ml)\b[^)\n]*?\)",
+    re.IGNORECASE,
+)
+_VAGUE_RULES_CACHE: list[dict[str, Any]] | None = None
+
+
+def load_vague_units_rules(base_dir: Path | None = None) -> list[dict[str, Any]]:
+    global _VAGUE_RULES_CACHE
+    if _VAGUE_RULES_CACHE is not None and base_dir is None:
+        return _VAGUE_RULES_CACHE
+    import yaml as _yaml
+    root = base_dir if base_dir is not None else (globals().get("BASE_DIR") or Path(__file__).resolve().parent)
+    path = root / "locales" / "vague_units.yaml"
+    if not path.is_file():
+        return []
+    raw = _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    rules = raw.get("rules", []) if isinstance(raw, dict) else []
+    if base_dir is None:
+        _VAGUE_RULES_CACHE = rules
+    return rules
+
+
+def _fmt_us_qty(val: float, unit: str) -> str:
+    from fractions import Fraction as _Frac
+    f = _Frac(val).limit_denominator(16)
+    quarters = [0, _Frac(1, 4), _Frac(1, 2), _Frac(3, 4), 1]
+    halves = [0, _Frac(1, 2), 1]
+    grid = quarters if val < 4 else (halves if val < 10 else [0, 1])
+    whole = int(f)
+    rem = f - whole
+    best = min(grid, key=lambda g: abs(rem - g))
+    snapped = _Frac(whole) + best
+    if snapped <= 0:
+        snapped = _Frac(1, 4) if unit in ("oz", "cup", "tsp", "tbsp") else _Frac(1)
+    w, r = int(snapped), snapped - int(snapped)
+    num_str = f"{w} {r}" if (w and r) else (str(w) if w else str(r))
+    u = unit.lower().replace(".", "").strip()
+    if u in ("cup", "cups"):
+        u = "cup" if snapped <= 1 else "cups"
+    elif u in ("sprig", "sprigs"):
+        u = "sprig" if snapped <= 1 else "sprigs"
+    return f"{num_str} {u}"
+
+
+def _norm_vague_unit_key(raw_unit: str) -> str:
+    u = re.sub(r"\s+", " ", raw_unit.lower().strip())
+    if u.startswith("handful"):
+        return "handful"
+    if u.startswith("pack"):
+        return "pack"
+    if u.startswith("scoop"):
+        return "scoop"
+    if u.startswith("bunch"):
+        return "bunch"
+    if u.startswith("bottle"):
+        return "bottle"
+    if u.startswith("can"):
+        return "can"
+    if u.startswith("pinch"):
+        return "pinch"
+    return u
+
+
+def normalize_vague_units(
+    ingredients: str,
+    row_id: int | None = None,
+    base_dir: Path | None = None,
+) -> tuple[str, list[str]]:
+    """Заменяет расплывчатые единицы (handful, pack, scoop, bunch, bottle, unsized can, a few, >1 pinch) на US-меры."""
+    rules = load_vague_units_rules(base_dir)
+    out_lines: list[str] = []
+    warns: list[str] = []
+    uni = globals().get("_UNI_FRAC", {"½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", "⅛": "1/8"})
+
+    for raw_line in (ingredients or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            out_lines.append(raw_line)
+            continue
+        norm_line = line
+        for k, v in uni.items():
+            norm_line = norm_line.replace(k, f" {v}").strip()
+        m = _VAGUE_UNIT_LINE_RE.match(norm_line)
+        if not m:
+            out_lines.append(raw_line)
+            continue
+
+        unit_key = _norm_vague_unit_key(m.group("unit"))
+        qty_str = m.group("qty")
+        qty = _to_float(qty_str) if qty_str else 1.0
+        rest = m.group("rest").strip()
+
+        # 1 pinch (или просто "pinch of salt") не трогаем — только pinch > 1
+        if unit_key == "pinch" and qty <= 1.0 + 1e-6:
+            out_lines.append(raw_line)
+            continue
+        # can с уже указанным размером (например "1 (14 oz) can" или "1 can (14 oz)") не считаем расплывчатым
+        if unit_key == "can" and re.search(r"\b\d+(?:\.\d+)?\s*-?\s*(?:oz|ounces?|g|grams?|ml)\b", norm_line, re.I):
+            out_lines.append(raw_line)
+            continue
+
+        # Приоритет 1: точная US-мера в скобках (например "(100 g/ 3.5 oz)")
+        pm = _PAREN_US_MEASURE_RE.search(rest)
+        if pm:
+            us_val = float(pm.group("n"))
+            us_unit = pm.group("u")
+            cleaned_rest = re.sub(r"\s{2,}", " ", (rest[:pm.start()] + rest[pm.end():])).strip(" ,;-")
+            out_lines.append(f"{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
+            continue
+
+        # Приоритет 1b: метрика в скобках -> перевод в US oz/tbsp
+        pm_m = _PAREN_METRIC_ONLY_RE.search(rest)
+        if pm_m:
+            m_val = float(pm_m.group("n"))
+            m_unit = pm_m.group("u").lower()
+            us_val, us_unit = (m_val / 28.35, "oz") if m_unit.startswith("g") else (m_val / 29.57, "fl oz")
+            cleaned_rest = re.sub(r"\s{2,}", " ", (rest[:pm_m.start()] + rest[pm_m.end():])).strip(" ,;-")
+            out_lines.append(f"{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
+            continue
+
+        # Приоритет 2: справочник locales/vague_units.yaml
+        matched_rule = None
+        for rule in rules:
+            if rule.get("unit") == unit_key and re.search(rule.get("pattern", ""), rest):
+                matched_rule = rule
+                break
+
+        if matched_rule:
+            size_mult = 1.5 if (m.group("size") or "").lower() in ("large", "big") else 1.0
+            total_amt = qty * size_mult * float(matched_rule["amount"])
+            out_lines.append(f"{_fmt_us_qty(total_amt, str(matched_rule['target_unit']))} {rest}".strip())
+            continue
+
+        # Приоритет 3: нет соответствия -> оставить как есть и WARNING
+        prefix = f"ID {row_id}: " if row_id is not None else ""
+        msg = f"{prefix}расплывчатая единица без соответствия: {line}"
+        warns.append(msg)
+        lg = globals().get("LOGGER")
+        if lg is not None:
+            lg.warning(msg)
+        out_lines.append(raw_line)
+
+    return "\n".join(out_lines), warns
+
+
 def build_sent_ingredients(src_row: dict[str, Any]) -> str:
     """Реконструирует ингредиенты в том виде, в котором они ушли в ИИ:
-    merge_broken_lines -> strip_recipe_refs -> (rescale). Нужно для fidelity_check,
+    merge_broken_lines -> strip_recipe_refs -> normalize_vague_units -> (rescale). Нужно для fidelity_check,
     чтобы API-результаты и кэш-хиты проверялись одинаково."""
     ing = merge_broken_lines(src_row.get("ingredients_list") or "")
     ing = strip_recipe_refs(ing)
+    ing, _ = normalize_vague_units(ing)
     if APP_MODE not in ("rewrite", "adapt"):
         return ing
     src_srv = normalize_servings(src_row.get("serves")) or 1
-    factor = choose_target_servings(src_srv, ing) / src_srv
+    src_instr = src_row.get("cooking_instructions") or ""
+    factor = choose_target_servings(src_srv, ing, instructions=src_instr) / src_srv
     if abs(factor - 1.0) > 1e-5:
-        ing, _, _ = scale_recipe(ing, src_row.get("cooking_instructions") or "", factor)
+        ing, _, _ = scale_recipe(ing, src_instr, factor)
     return ing
 
 
@@ -1955,7 +2141,8 @@ def validate_and_fix_rewrite(item: RewrittenRecipe, src_row: dict[str, Any]) -> 
     # 1. Порции
     src_srv = normalize_servings(src_row.get("serves")) or 1
     ing_for_srv = strip_recipe_refs(merge_broken_lines(src_row.get("ingredients_list") or ""))
-    expected_srv = choose_target_servings(src_srv, ing_for_srv)
+    ing_for_srv, _ = normalize_vague_units(ing_for_srv)
+    expected_srv = choose_target_servings(src_srv, ing_for_srv, instructions=src_row.get("cooking_instructions") or "")
     if item.servings != expected_srv:
         warns.append(f"servings: AI={item.servings}, ожидалось {expected_srv} (принудительно)")
         item.servings = expected_srv
@@ -2019,6 +2206,11 @@ def validate_and_fix_rewrite(item: RewrittenRecipe, src_row: dict[str, Any]) -> 
     )
     if st:
         warns.append(f"стиль: {st}")
+
+    # 10. Расплывчатые единицы без веса (мягкое предупреждение)
+    vg = vague_units_check(item.ingredients_list)
+    if vg:
+        warns.append(f"остались расплывчатые единицы: {vg}")
 
     return warns
 
@@ -2399,6 +2591,7 @@ def main() -> int:
                         if is_rewrite_pipeline:
                             merged = merge_broken_lines(r.get("ingredients_list") or "")
                             pr["ingredients_list"] = strip_recipe_refs(merged)
+                            pr["ingredients_list"], _ = normalize_vague_units(pr["ingredients_list"], row_id=row_key)
                             if "recipe" in pr["ingredients_list"].lower():
                                 LOGGER.warning(
                                     f"ID {row_key}: в ингредиентах осталось слово 'recipe' "
@@ -2416,7 +2609,12 @@ def main() -> int:
                                 "servings": src_srv,
                             }
                         elif is_rewrite_pipeline:
-                            new_srv = choose_target_servings(src_srv, pr["ingredients_list"], row_id=row_key)
+                            new_srv = choose_target_servings(
+                                src_srv,
+                                pr["ingredients_list"],
+                                row_id=row_key,
+                                instructions=pr.get("cooking_instructions") or "",
+                            )
                             if new_srv != src_srv:
                                 factor = new_srv / src_srv
                                 if abs(factor - 1.0) > 1e-5:
