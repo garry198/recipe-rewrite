@@ -34,7 +34,17 @@
 - **(д) Секреты:** ключи API и значения секретов нигде не писать, только `key_fp`.
 - **(е) Документация:** правки `AGENTS.md`, `docs/*` коммитить сразу, не оставлять незакоммиченными.
 - **(ж) Конфликты слияния:** конфликт (в т.ч. при `git merge main` в свою ветку) не разрешать молча — сохранить разрешение в `reviews/rNN/merge_resolution.patch` (`git diff` после разрешения) и описать в `worker_notes.md`.
-- **(з) Игнорируемые папки:** папки из `.gitignore` (`inbox/`, `backups/`, `reviews/*`) git не создаёт — создавать вручную (`New-Item -ItemType Directory -Force`).
+- **(з) Игнорируемые папки:** папки из `.gitignore` (`backups/`, `reviews/*`) git не создаёт — создавать вручную (`New-Item -ItemType Directory -Force`).
+- **(и) Статус волн:** состав и статус волн ведёт `docs/STATE.md`. После любой задачи, меняющей поведение запуска, обновить разделы «Оперативный статус» и «Как проходит волна».
+
+## Где что лежит
+- `tools/` — `merge_branch.ps1`, `test_suites.ps1`, `make_review_pack.ps1`, `rollback_force.py`, `api_usage_report.py`.
+- `docs/` — `STATE.md`, `WORKFLOW.md`, `CONTRACTS.md`, `DB_SCHEMA.md`, `REFERENCE_IDS.md`, `DESIGN_LOCALES.md`.
+- `logs/` — `force_report_*`, `rewrite_ids_adapt_*`, `rewrite_update_log.csv`.
+- `backups/` — резервные копии `recipe_rewrite_force_<ts>.jsonl` и `.meta.json` перед `ADAPT_FORCE=1`.
+- `api_usage.csv` — журнал расходов и токенов API (с `account_label` и `key_fp`).
 
 ## Формат заметки
 `worker_notes.md` заполняется по шаблону из `tools/make_review_pack.ps1` (кратко, только итог, без пересказа diff и процесса).
+
+Сообщения другим проектам — только файлом в C:\Мои документы\Py\_hub\inbox\<кому>\ по C:\Мои документы\Py\_hub\PROTOCOL.md (from = имя этого проекта). Читать — только _hub\inbox\<имя этого проекта>\.

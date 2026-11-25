@@ -15,7 +15,7 @@ Claude проверяет не только код, но и: не выросла
 - Воркер работает только в ветке `worker/rNN`, коммитит локально, в `main` не коммитит и не пушит; при доработках дополняет ту же ветку (`rNN.1`, `rNN.2`…).
 - Теги на значимые состояния: `v22-baseline`, далее `v23`… (совпадают с номером в имени старых скриптов).
 - Стыки с другими пайплайнами описываются в `CONTRACTS.md`; чужой код здесь не хранится, только читается по ссылке.
-- При перезаписи строк через `ADAPT_FORCE=1`: сначала `DRY_RUN=1` + проверка `logs/force_report_<ts>.md`, затем `DRY_RUN=0` (авто-бэкап в `backups/`), затем `cost-nutrients` по файлу ID; откат при необходимости — `tools/rollback_force.py`.
+- Порядок запуска волны (`DRY_RUN=1` → проверка `logs/force_report_*.md` → `DRY_RUN=0` → передача `logs/rewrite_ids_adapt_<ts>.txt` в `cost-nutrients` через `_hub` → откат через `tools/rollback_force.py`) описан в [docs/STATE.md](STATE.md) («Как проходит волна»).
 - **Учёт расходов (`api_usage.csv`)**: к каждой строке добавляются `account_label` (дефолт `"main"`, согласовано с `cost-nutrients (q41.8)` и `Book Pipeline`), `key_fp` (первые 8 символов SHA-256 ключа, сам ключ никогда не логируется), `run_hash`, `app_mode`, `recipe_ids`, `dry_run`, `run_ts`. При смене заголовка старый файл автоматически переименовывается в `api_usage_legacy_<ts>.csv`.
   Сводка по аккаунтам: `python tools/api_usage_report.py [--since YYYY-MM-DD] [--by account|day|run_hash]` или в PowerShell:
   `Import-Csv -Delimiter ';' api_usage.csv | Group-Object account_label | ForEach-Object { [PSCustomObject]@{ account = if ($_.Name) { $_.Name } else { 'legacy' }; requests = $_.Count; cost_usd = ($_.Group | Measure-Object -Property cost_usd -Sum).Sum } }`
@@ -24,5 +24,5 @@ Claude проверяет не только код, но и: не выросла
   - Используйте `python rewr-transl.py 2>&1 | Out-File logs\run.log -Encoding utf8` (и при необходимости `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:PYTHONUTF8 = "1"`).
   - **Внимание:** оператор `>` и `Tee-Object` в PowerShell 5.1 по умолчанию пишут в **UTF-16LE**, что ломает UTF-8-инструменты и diff — для UTF-8 используйте `Out-File -Encoding utf8`.
 - **Пакет сдачи `reviews/rNN/`**: собирается `.\tools\make_review_pack.ps1 rNN` и содержит `diff.patch`, `stat.txt`, `commits.txt`, `tests.txt`, `compile.txt`, `worker_notes.md` (и при разрешении конфликта слияния — `merge_resolution.patch`).
-- **Эталонный прогон**: набор из 12 `recipes3.id` и порядок сравнения до/после описаны в [docs/REFERENCE_IDS.md](REFERENCE_IDS.md) (прогон с `DRY_RUN=1` запускает владелец; воркер API не запускает).
-- **Обмен между чатами**: правила и шаблон сообщений — в [inbox/README.md](../inbox/README.md).
+- **Эталонный прогон**: эталонный набор `recipes3.id` и порядок сравнения до/после описаны в [docs/REFERENCE_IDS.md](REFERENCE_IDS.md) (прогон с `DRY_RUN=1` запускает владелец; воркер API не запускает).
+- **Обмен между проектами**: через `C:\Мои документы\Py\_hub\inbox\<кому>\` по `PROTOCOL.md` (см. [AGENTS.md](../AGENTS.md)).
