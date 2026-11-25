@@ -148,62 +148,64 @@ CREATE TABLE `price_history` (
 
 ## 3. Места чтения и записи БД в `rewr-transl.py`
 
-Скрипт `rewr-transl.py` работает **только с таблицей `recipe_rewrite`** (таблицы `recipes3` и `price_history` в коде не читаются и не изменяются).
+Скрипт `rewr-transl.py` работает с таблицами `recipes3` (только `SELECT` в режиме `adapt` и `FORCE`) и `recipe_rewrite` (`SELECT`, `INSERT`, `UPDATE`). Таблица `price_history` в коде не читается и не изменяется.
 
-1. `get_db_connection()` (`rewr-transl.py:924–929`) — подключение к MariaDB (`autocommit=False`).
-2. `fetch_rewrite_rows()` (`rewr-transl.py:932–945`, вызов в `rewr-transl.py:1357`) — чтение исходных строк:
-   - `SELECT id AS rewrite_row_id, recipe_id, variant_type, dish_name_variant AS dish_name, ingredients_list_variant AS ingredients_list, cooking_instructions_variant AS cooking_instructions, serves, prep_time_minutes, cook_time_minutes FROM recipe_rewrite WHERE id IN (...) ORDER BY id ASC`
-3. `save_rewritten_recipe()` (`rewr-transl.py:966–1015`, вызов в `rewr-transl.py:1614`):
-   - при `APP_MODE == "rewrite"` (`rewr-transl.py:971–980`):
-     `UPDATE recipe_rewrite SET ingredients_list_variant = ?, cooking_instructions_variant = ?, instructions_hash = ?, serves = ?, ai_model = ?, updated_at = NOW() WHERE id = ?`
-   - при `APP_MODE == "translate"` (`rewr-transl.py:982–1013`):
-     `INSERT INTO recipe_rewrite (recipe_id, market, locale, variant_type, dish_name_variant, ingredients_list_variant, cooking_instructions_variant, instructions_hash, serves, prep_time_minutes, cook_time_minutes, currency, calories_per_person, proteins_per_person, fats_per_person, carbohydrates_per_person, netcarbs_per_person, ai_model, created_at, updated_at) SELECT recipe_id, ?, ?, variant_type, ?, ?, ?, ?, serves, prep_time_minutes, cook_time_minutes, ?, calories_per_person, proteins_per_person, fats_per_person, carbohydrates_per_person, netcarbs_per_person, ?, NOW(), NOW() FROM recipe_rewrite WHERE id = ? ON DUPLICATE KEY UPDATE dish_name_variant = VALUES(dish_name_variant), ingredients_list_variant = VALUES(ingredients_list_variant), cooking_instructions_variant = VALUES(cooking_instructions_variant), instructions_hash = VALUES(instructions_hash), currency = VALUES(currency), ai_model = VALUES(ai_model), updated_at = NOW()`
-4. Транзакции: `connection.commit()` (`rewr-transl.py:1619`), `connection.rollback()` (`rewr-transl.py:1632`, `1641`).
+1. `get_db_connection()` — подключение к MariaDB (`autocommit=False`).
+2. `fetch_rewrite_rows()` — чтение исходных строк из `recipe_rewrite` (режимы `rewrite` и `translate`).
+3. `fetch_adapt_rows()` / `fetch_used_before_map()` — чтение исходных рецептов из `recipes3` (с `LEFT JOIN recipe_rewrite`) в режиме `adapt` и `ADAPT_FORCE=1`.
+4. `fetch_recipe_rewrite_for_backup()` — чтение существующих строк `recipe_rewrite` для резервной копии перед `ADAPT_FORCE=1`.
+5. `save_adapted_recipe()` (режим `adapt` и `ADAPT_FORCE=1`):
+   - `INSERT INTO recipe_rewrite (...) VALUES (..., needs_reprice=1, dish_cost_serves=serves, ...)` — КБЖУ, цена и `nutrients_recalc_version` не заполняются (владелец — `cost-nutrients`).
+   - при `ADAPT_FORCE=1` добавляется `ON DUPLICATE KEY UPDATE`: обновляет текст/порции/`status`/`dish_cost_serves`/`needs_reprice = 1`/`ai_model`/`updated_at = NOW()` (при `FORCE_KEEP_DISH_NAME=1` поле `dish_name_variant` сохраняется прежним) и **сбрасывает в `NULL`** поля `calories_per_person`, `proteins_per_person`, `fats_per_person`, `carbohydrates_per_person`, `netcarbs_per_person`, `dish_cost_local`, `nutrients_recalc_version`.
+6. `save_rewritten_recipe()`:
+   - при `APP_MODE == "rewrite"`: `UPDATE recipe_rewrite SET ingredients_list_variant, cooking_instructions_variant, instructions_hash, serves, dish_cost_serves, needs_reprice = 1, ai_model, updated_at = NOW() WHERE id = ?`.
+   - при `APP_MODE == "translate"`: `INSERT INTO recipe_rewrite (...) ... ON DUPLICATE KEY UPDATE ...` с `needs_reprice = 1`, `dish_cost_serves = serves` (без `dish_cost_local`).
+7. Транзакции: в `commit_batch_with_ids()` сначала пишется ID-файл для `cost-nutrients` (`append_ids_file`), затем вызывается `connection.commit()`; при ошибке записи файла или батча выполняется `connection.rollback()`.
 
 ---
 
 ## 4. Таблица «поле — кто пишет — кто читает (по коду этого репозитория)»
 
-> Для смежных пайплайнов (вне этого репозитория) указано «неизвестно».
+> Для смежных пайплайнов (`cost-nutrients`, `recipe-ingest` и др.) указано владение по контрактам (`docs/CONTRACTS.md`).
 
 ### `recipe_rewrite`
 
 | Поле | Кто пишет (по коду этого репозитория) | Кто читает (по коду этого репозитория) |
 |---|---|---|
-| `id` | БД (`AUTO_INCREMENT`); внешние пайплайны: неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`, `WHERE id = ?` в `save_rewritten_recipe`) |
-| `recipe_id` | `rewr-transl.py` (`translate`: `INSERT` из исходной строки); иначе неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`, `translate`: `SELECT` из исходной строки) |
-| `market` | `rewr-transl.py` (`translate`: `INSERT` = `TARGET_MARKET`); иначе неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `locale` | `rewr-transl.py` (`translate`: `INSERT` = `TARGET_LOCALE`); иначе неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `variant_type` | `rewr-transl.py` (`translate`: `INSERT` из исходной строки); иначе неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`, `translate`: `SELECT` из исходной строки) |
-| `cooking_instructions_variant` | `rewr-transl.py` (`rewrite`: `UPDATE`; `translate`: `INSERT` / `ON DUPLICATE KEY UPDATE`) | `rewr-transl.py` (`fetch_rewrite_rows`) |
-| `search_text` | в этом репозитории не пишется; внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `instructions_hash` | `rewr-transl.py` (`rewrite`: `UPDATE`; `translate`: `INSERT` / `ON DUPLICATE KEY UPDATE`) | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `status` | в этом репозитории явно не пишется (при `INSERT` получает `DEFAULT 'active'`); внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `created_at` | `rewr-transl.py` (`translate`: `INSERT` = `NOW()`); БД `DEFAULT current_timestamp()` | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `updated_at` | `rewr-transl.py` (`rewrite`: `UPDATE` = `NOW()`; `translate`: `INSERT` / `ON DUPLICATE KEY UPDATE` = `NOW()`); БД `ON UPDATE` | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `ai_model` | `rewr-transl.py` (`rewrite`: `UPDATE`; `translate`: `INSERT` / `ON DUPLICATE KEY UPDATE`) | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `dish_name_variant` | `rewr-transl.py` (`translate`: `INSERT` / `ON DUPLICATE KEY UPDATE`); иначе неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`) |
-| `ingredients_list_variant` | `rewr-transl.py` (`rewrite`: `UPDATE`; `translate`: `INSERT` / `ON DUPLICATE KEY UPDATE`) | `rewr-transl.py` (`fetch_rewrite_rows`) |
-| `calories_per_person` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`translate`: `SELECT` из исходной строки) |
-| `proteins_per_person` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`translate`: `SELECT` из исходной строки) |
-| `fats_per_person` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`translate`: `SELECT` из исходной строки) |
-| `carbohydrates_per_person` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`translate`: `SELECT` из исходной строки) |
-| `netcarbs_per_person` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`translate`: `SELECT` из исходной строки) |
-| `serves` | `rewr-transl.py` (`rewrite`: `UPDATE`; `translate`: `INSERT` копированием из исходной строки) | `rewr-transl.py` (`fetch_rewrite_rows`, `translate`: `SELECT` из исходной строки) |
-| `prep_time_minutes` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`, `translate`: `SELECT` из исходной строки) |
-| `cook_time_minutes` | `rewr-transl.py` (`translate`: `INSERT` копированием из исходной строки); иначе неизвестно | `rewr-transl.py` (`fetch_rewrite_rows`, `translate`: `SELECT` из исходной строки) |
-| `dish_cost_local` | в этом репозитории не пишется; внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `currency` | `rewr-transl.py` (`translate`: `INSERT` / `ON DUPLICATE KEY UPDATE` = `TARGET_CURRENCY`); иначе неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `nutrients_recalc_version` | в этом репозитории не пишется; внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `needs_reprice` | в этом репозитории явно не пишется (при `INSERT` получает `DEFAULT 0`); внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
-| `dish_cost_serves` | в этом репозитории не пишется; внешние пайплайны: неизвестно | в этом репозитории не читается; внешние пайплайны: неизвестно |
+| `id` | БД (`AUTO_INCREMENT`); `LAST_INSERT_ID(id)` при `FORCE`/`translate` | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`, `rollback_force.py`) |
+| `recipe_id` | `rewr-transl.py` (`adapt`/`FORCE`: из `recipes3.id`; `translate`: из исходной строки) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_adapt_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `market` | `rewr-transl.py` (`adapt`: `ADAPT_MARKET`; `translate`: `TARGET_MARKET`) | `rewr-transl.py` (`build_adapt_select`, `fetch_recipe_rewrite_for_backup`) |
+| `locale` | `rewr-transl.py` (`adapt`: `ADAPT_LOCALE`; `translate`: `TARGET_LOCALE`) | `rewr-transl.py` (`build_adapt_select`, `fetch_recipe_rewrite_for_backup`) |
+| `variant_type` | `rewr-transl.py` (`adapt`: `'rewrite'`; `translate`: из исходной строки) | `rewr-transl.py` (`fetch_rewrite_rows`, `build_adapt_select`) |
+| `cooking_instructions_variant` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `search_text` | не пишется | не читается |
+| `instructions_hash` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `status` | `rewr-transl.py` (`adapt`/`FORCE`: `ADAPT_STATUS`, по умолчанию `'draft'`/`'active'`) | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `created_at` | БД `DEFAULT current_timestamp()` / `translate` `NOW()` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `updated_at` | `rewr-transl.py` (`NOW()`) / БД `ON UPDATE` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `ai_model` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `dish_name_variant` | `rewr-transl.py` (`adapt`: из `recipes3.dish_name`; при `FORCE` и `FORCE_KEEP_DISH_NAME=1` не перезаписывается; `translate`: перевод) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `ingredients_list_variant` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `calories_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
+| `proteins_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
+| `fats_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
+| `carbohydrates_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
+| `netcarbs_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
+| `serves` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `prep_time_minutes` | `rewr-transl.py` (`adapt`/`FORCE` из `recipes3`; `translate` из исходной строки) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `cook_time_minutes` | `rewr-transl.py` (`adapt`/`FORCE` из `recipes3`; `translate` из исходной строки) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `dish_cost_local` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `currency` | `rewr-transl.py` (`adapt`/`FORCE`: `'USD'`; `translate`: `TARGET_CURRENCY`) | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `nutrients_recalc_version` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; владелец — `cost-nutrients` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
+| `needs_reprice` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`: выставляет `1`) | `cost-nutrients` |
+| `dish_cost_serves` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`: `= serves`) | `cost-nutrients` |
 
 ### `recipes3`
-В коде этого репозитория (`rewr-transl.py`, `checks.py`) таблица `recipes3` не читается и не пишется. Для всех полей (`id`, `recipe_no`, `dish_name`, `dish_icon`, `diet_type`, `dish_type`, `main_ingredient`, `source_url`, `ingredients_list`, `cooking_instructions`, `calories_per_person`, `proteins_per_person`, `fats_per_person`, `carbohydrates_per_person`, `netcarbs_per_person`, `prep_time_minutes`, `cook_time_minutes`, `serves`, `recipe_entry_date`, `dish_cost`, `cost_updated_at`, `used_before`, `created_at`, `updated_at`, `normalized_name`, `ingredients_hash`, `ingredients_signature`):
-- **Кто пишет:** неизвестно (в этом репозитории не пишется).
-- **Кто читает:** неизвестно (в этом репозитории не читается).
+В `rewr-transl.py` таблица `recipes3` используется **только на чтение (`SELECT`)** в режиме `adapt` / `ADAPT_FORCE=1`:
+- **Кто пишет:** внешние пайплайны (`recipe-ingest` и др.); `recipe-rewrite` в `recipes3` никогда не пишет.
+- **Кто читает:** `rewr-transl.py` (`fetch_adapt_rows` читает `id`, `dish_name`, `ingredients_list`, `cooking_instructions`, `serves`, `prep_time_minutes`, `cook_time_minutes`, `dish_type`; `fetch_used_before_map` читает `id`, `used_before`).
 
 ### `price_history`
-В коде этого репозитория (`rewr-transl.py`, `checks.py`) таблица `price_history` не читается и не пишется. Для всех полей (`id`, `rewrite_id`, `price_amount`, `currency`, `country_code`, `city`, `market`, `locale`, `price_date`, `priced_at`, `ai_model`, `price_source`, `ingredients_basis`, `pricing_confidence`, `is_current`, `nutrition_confidence`, `nutrition_readiness`, `nutrition_coverage`, `nutrition_version`, `calories_per_serving`):
-- **Кто пишет:** неизвестно (в этом репозитории не пишется).
-- **Кто читает:** неизвестно (в этом репозитории не читается).
+В коде этого репозитория (`rewr-transl.py`, `checks.py`) таблица `price_history` не читается и не пишется.
+- **Кто пишет:** `cost-nutrients` (в этом репозитории не пишется).
+- **Кто читает:** внешние пайплайны (в этом репозитории не читается).
