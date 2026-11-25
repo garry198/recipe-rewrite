@@ -259,5 +259,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check("append_ids_file writes UTF-8 LF without header or CRLF",
           n1 == 2 and n2 == 1 and raw_bytes == b"101\n102\n103\n" and b"\r\n" not in raw_bytes)
 
+    # r16.3: commit_batch_with_ids — запись ID-файла до commit(); при OSError -> rollback, без commit
+    class FakeTxConn:
+        def __init__(self):
+            self.committed = 0
+            self.rolled_back = 0
+
+        def commit(self):
+            self.committed += 1
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    conn_ok = FakeTxConn()
+    f_tx = Path(tmp) / "ids_tx.txt"
+    n_tx = ns["commit_batch_with_ids"](conn_ok, f_tx, [9901, 9902])
+    check("r16.3: commit_batch_with_ids writes file then commits",
+          n_tx == 2 and conn_ok.committed == 1 and conn_ok.rolled_back == 0 and f_tx.read_bytes() == b"9901\n9902\n")
+
+    conn_err = FakeTxConn()
+
+    def _boom(_p, _ids):
+        raise OSError("disk full")
+
+    got_oserr = False
+    try:
+        ns["commit_batch_with_ids"](conn_err, f_tx, [9903], append_fn=_boom)
+    except OSError:
+        got_oserr = True
+    check("r16.3: commit_batch_with_ids rolls back and skips commit on OSError",
+          got_oserr and conn_err.committed == 0 and conn_err.rolled_back == 1)
+
 print(f"\nИТОГО adapt: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)

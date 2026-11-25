@@ -200,9 +200,53 @@ MODEL_PRICING_USD_PER_MILLION = {
 
 # ================= МАТЕМАТИКА РЕЦЕПТА =================
 _METRIC_LEAD_RE = re.compile(
-    r"^\s*\d+(?:\.\d+)?(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*(?:g|grams?|ml)\b\s+(?P<name>[^(]*?)\s*"
-    r"\((?:about|approx\.?|approximately|~)?\s*(?P<us>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?(?:\s*[-–]\s*\d+)?\s*"
-    r"(?:tsps?|tbsps?|cups?|oz|lbs?)\b)(?P<tail>[^)]*)\)", re.IGNORECASE)
+    r"^\s*(?P<mn>\d+(?:\.\d+)?)(?:\s*[-–]\s*(?P<mn2>\d+(?:\.\d+)?))?\s*"
+    r"(?P<mu>g|grams?|kg|kilograms?|ml|milliliters?|l|liters?|litres?)\b\s+(?P<name>[^(]*?)\s*"
+    r"\((?:about|approx\.?|approximately|~)?\s*"
+    r"(?P<us>(?P<un>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?)(?:\s*[-–]\s*(?P<un2>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?))?\s*"
+    r"(?P<uu>fl\.?\s*oz|tsps?|tbsps?|cups?|oz|lbs?)\b)(?P<tail>[^)]*)\)", re.IGNORECASE)
+
+_UNICODE_SPACES_RE = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+
+
+def normalize_unicode_spaces(text: str | None) -> str:
+    """Заменяет NBSP, узкие и прочие юникод-пробелы на обычный ASCII-пробел."""
+    if not text:
+        return text or ""
+    return _UNICODE_SPACES_RE.sub(" ", text)
+
+
+def _metric_us_conflict(m_val: float, m_unit: str, us_val: float, us_unit: str) -> tuple[bool, str | None]:
+    """Проверяет расхождение >15% между ведущей метрикой и US-мерой в скобках одной размерности.
+    Возвращает (is_conflict, precise_us_replacement_or_None)."""
+    mu = m_unit.lower()
+    uu = re.sub(r"\s+", " ", us_unit.lower().replace(".", "").strip())
+    if mu in ("g", "gram", "grams", "kg", "kilogram", "kilograms"):
+        m_g = m_val * 1000.0 if mu.startswith("k") else m_val
+        if uu == "oz":
+            u_g = us_val * 28.3495
+        elif uu in ("lb", "lbs"):
+            u_g = us_val * 453.592
+        else:
+            return False, None
+        if m_g > 0 and abs(m_g - u_g) / m_g > 0.15:
+            if m_g >= 453.592:
+                lb = round(m_g / 453.592, 1)
+                return True, f"{lb:g} lb"
+            repl = _grams_to_us(m_g) or f"{round(m_g / 28.3495, 1):g} oz"
+            return True, repl
+        return False, None
+    if mu in ("ml", "milliliter", "milliliters", "l", "liter", "liters", "litre", "litres"):
+        m_ml = m_val if mu.startswith("m") else m_val * 1000.0
+        vol_ml = {"tsp": 4.929, "tsps": 4.929, "tbsp": 14.787, "tbsps": 14.787,
+                  "fl oz": 29.574, "cup": 236.588, "cups": 236.588}
+        if uu not in vol_ml:
+            return False, None
+        u_ml = us_val * vol_ml[uu]
+        if m_ml > 0 and abs(m_ml - u_ml) / m_ml > 0.15:
+            repl = _metric_to_us(m_val, m_unit) or f"{round(m_ml / 29.574, 1):g} fl oz"
+            return True, repl
+    return False, None
 
 
 _METRIC_ONLY_RE = re.compile(
@@ -279,9 +323,10 @@ def clean_source_line_noise(text: str) -> str:
 
 
 def normalize_metric_leads(text: str) -> str:
-    """'7-9 grams gelatin (about 2 tsp or a bit more)' -> '2 tsp gelatin (or a bit more)'."""
+    """'7-9 grams gelatin (about 2 tsp or a bit more)' -> '2 tsp gelatin (or a bit more)'.
+    При расхождении ведущей метрики и US-меры в скобках >15% доверяет метрике и пишет WARNING."""
     out = []
-    for line in (text or "").splitlines():
+    for line in normalize_unicode_spaces(text).splitlines():
         mo = _METRIC_ONLY_RE.match(line)
         if mo and not _METRIC_LEAD_RE.match(line):
             lo = _metric_to_us(float(mo.group("n")), mo.group("u"))
@@ -293,8 +338,23 @@ def normalize_metric_leads(text: str) -> str:
         m = _METRIC_LEAD_RE.match(line)
         if m:
             tail = m.group("tail").strip()
-            out.append(f"{_dec_to_fraction_text(m.group('us').strip())} {m.group('name').strip()}"
-                       + (f" ({tail})" if tail else ""))
+            try:
+                m_val = float(m.group("mn"))
+                us_val = float(_sval(m.group("un")))
+                conflict, repl = _metric_us_conflict(m_val, m.group("mu"), us_val, m.group("uu"))
+            except (ValueError, ZeroDivisionError):
+                conflict, repl = False, None
+            if conflict and repl:
+                lg = globals().get("LOGGER")
+                if lg is not None:
+                    lg.warning(
+                        f"Конфликт метрики и US-меры (>15%): '{m.group('mn')} {m.group('mu')}' vs "
+                        f"'{m.group('us').strip()}' -> использую метрику '{repl}' ({line.strip()[:80]})"
+                    )
+                out.append(f"{repl} {m.group('name').strip()}" + (f" ({tail})" if tail else ""))
+            else:
+                out.append(f"{_dec_to_fraction_text(m.group('us').strip())} {m.group('name').strip()}"
+                           + (f" ({tail})" if tail else ""))
         else:
             out.append(line)
     return "\n".join(out)
@@ -304,7 +364,7 @@ def merge_broken_lines(text: str) -> str:
     """Склеивает строки, если в них не закрыта скобка. ТОЛЬКО для ингредиентов.
     Строка, начинающаяся с количества, никогда не приклеивается к предыдущей (битая '( (' в источнике)."""
     out, buf = [], ""
-    for line in (text or "").splitlines():
+    for line in normalize_unicode_spaces(text).splitlines():
         s = line.strip()
         if not s:
             continue
@@ -340,11 +400,14 @@ _INSTR_RE = re.compile(
 
 
 def _sval(s: str) -> Fraction:
-    s = s.strip()
-    if " " in s:
-        whole, frac = s.split(None, 1)
-        return Fraction(whole) + Fraction(frac)
-    return Fraction(s)
+    s = normalize_unicode_spaces(s).strip()
+    try:
+        if " " in s:
+            whole, frac = s.split(None, 1)
+            return Fraction(whole) + Fraction(frac)
+        return Fraction(s)
+    except ZeroDivisionError as exc:
+        raise ValueError(f"Деление на ноль в количестве: {s!r}") from exc
 
 
 def _sfmt(x: Fraction) -> str:
@@ -449,8 +512,11 @@ def _render_count(v: Fraction) -> str:
 def _scale_qty(n1: str, n2: str | None, unit: str | None, factor: float,
                warns: list, ctx: str) -> str | None:
     f = Fraction(factor).limit_denominator(1000)
-    v1 = _sval(n1) * f
-    v2 = _sval(n2) * f if n2 else None
+    try:
+        v1 = _sval(n1) * f
+        v2 = _sval(n2) * f if n2 else None
+    except (ValueError, ZeroDivisionError):
+        return None
 
     if unit:
         k = _kind(unit)
@@ -529,19 +595,30 @@ def _scale_leading(line: str, factor: float, warns: list) -> str:
     if not unit and re.match(r"\s*(?:pinch|dash)(?:es)?\b", rest, re.IGNORECASE):
         return line  # щепотку и dash не делим
     if not unit and not m.group("n2") and re.match(r"\s*cloves?\b", rest, re.IGNORECASE):
-        v = _sval(m.group("n1")) * Fraction(factor).limit_denominator(1000)
+        try:
+            v = _sval(m.group("n1")) * Fraction(factor).limit_denominator(1000)
+        except (ValueError, ZeroDivisionError):
+            return line
         return f"{m.group('ws')}{max(1, int(v + Fraction(1, 2)))}{m.group('sp') or ' '}{rest.lstrip()}"  # зубчик не делим
     if not unit and not m.group("n2"):
         head, par, paren = rest.partition("(")
-        egg = _egg_to_tbsp(_sval(m.group("n1")) * Fraction(factor).limit_denominator(1000), head)
+        try:
+            egg = _egg_to_tbsp(_sval(m.group("n1")) * Fraction(factor).limit_denominator(1000), head)
+        except (ValueError, ZeroDivisionError):
+            return line
         if egg:
             warns.append(f"яйцо переведено в ложки: {line.strip()[:40]} -> {egg}")
             return f"{m.group('ws')}{egg}" + (f" ({paren}" if par else "")
     if unit and not m.group("n2"):
-        comp = _scale_compound(m.group("n1"), unit, rest, factor)
+        try:
+            comp = _scale_compound(m.group("n1"), unit, rest, factor)
+        except (ValueError, ZeroDivisionError):
+            comp = None
         if comp:
             return f"{m.group('ws')}{comp[0]}{comp[1]}"
     new = _scale_qty(m.group("n1"), m.group("n2"), unit, factor, warns, line)
+    if new is None:
+        return line
     sep = " " if (unit or m.group("sp")) else ""
     if unit:
         return f"{m.group('ws')}{new}{rest}"
@@ -553,7 +630,7 @@ _UNI_FRAC = {"½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", 
 
 def _norm_fractions(text: str) -> str:
     """'1½ tsp' -> '1 1/2 tsp', '¼ cup' -> '1/4 cup' (иначе дробь в начале строки не масштабируется)."""
-    text = text or ""
+    text = normalize_unicode_spaces(text)
     text = re.sub(r"(\d)([½¼¾⅓⅔⅛])", lambda m: f"{m.group(1)} {_UNI_FRAC[m.group(2)]}", text)
     return re.sub(r"[½¼¾⅓⅔⅛]", lambda m: _UNI_FRAC[m.group(0)], text)
 
@@ -745,13 +822,16 @@ CUP_GRAMS = LOCALE.cup_grams
 
 
 def _to_float(s: str) -> float:
-    s = s.strip()
+    s = re.sub(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]", " ", s or "").strip()
     if " " in s:
         whole, frac = s.split(None, 1)
         return float(whole) + _to_float(frac)
     if "/" in s:
         n, d = s.split("/")
-        return float(n) / float(d)
+        dv = float(d)
+        if dv == 0:
+            raise ValueError(f"Деление на ноль: {s!r}")
+        return float(n) / dv
     return float(s)
 
 
@@ -1166,6 +1246,24 @@ def append_ids_file(filepath: Path, row_ids: Sequence[int]) -> int:
     return len(row_ids)
 
 
+def commit_batch_with_ids(
+    connection,
+    ids_out_file: Path,
+    batch_saved_ids: Sequence[int],
+    append_fn=None,
+) -> int:
+    """Сначала пишет ID-файл для cost-nutrients, затем коммитит транзакцию БД.
+    Если запись файла упала, commit не выполняется и делается rollback."""
+    fn = append_fn if append_fn is not None else append_ids_file
+    try:
+        written = fn(ids_out_file, batch_saved_ids)
+    except Exception:
+        connection.rollback()
+        raise
+    connection.commit()
+    return written
+
+
 def parse_rewrite_ids(raw: str) -> list[int]:
     if not raw:
         return []
@@ -1189,13 +1287,31 @@ def generate_run_hash(prompt_text: str, model: str, target_servings: int) -> str
         f"{prompt_text}|{model}|{target_servings}|{APP_MODE}|{TARGET_LOCALE}|{THINKING_LEVEL}|"
         f"{UNITS_VERSION}|{SCALE_VERSION}|{CHECKS_VERSION}"
     )
+    g = globals()
+    skip_bakeware = bool(g.get("RESCALE_SKIP_BAKEWARE", True))
+    skip_paren_qty = bool(g.get("RESCALE_SKIP_PAREN_QTY", True))
+    max_divisor = float(g.get("RESCALE_MAX_DIVISOR", 2.5))
+    only_more_than = int(g.get("RESCALE_ONLY_IF_MORE_THAN", 8))
+    extras: list[str] = []
+    if skip_bakeware is not True:
+        extras.append(f"sb={int(skip_bakeware)}")
+    if skip_paren_qty is not True:
+        extras.append(f"sp={int(skip_paren_qty)}")
+    if abs(max_divisor - 2.5) > 1e-6:
+        extras.append(f"md={max_divisor:g}")
+    if only_more_than != 8:
+        extras.append(f"om={only_more_than}")
+    if extras:
+        raw += "|" + "|".join(extras)
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
 
 
 def row_fingerprint(row: dict[str, Any]) -> str:
     raw = (
-        f"{row.get('dish_name', '')}|{row.get('ingredients_list', '')}|"
-        f"{row.get('cooking_instructions', '')}|{row.get('serves', '')}"
+        f"{normalize_unicode_spaces(row.get('dish_name', ''))}|"
+        f"{normalize_unicode_spaces(row.get('ingredients_list', ''))}|"
+        f"{normalize_unicode_spaces(row.get('cooking_instructions', ''))}|"
+        f"{row.get('serves', '')}"
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
 
@@ -1219,7 +1335,12 @@ def fetch_rewrite_rows(connection: mariadb.Connection, rewrite_ids: Sequence[int
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(sql, tuple(rewrite_ids))
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        for r in rows:
+            for k in ("dish_name", "ingredients_list", "cooking_instructions"):
+                if isinstance(r.get(k), str):
+                    r[k] = normalize_unicode_spaces(r[k])
+        return rows
     finally:
         cursor.close()
 
@@ -1319,7 +1440,12 @@ def fetch_adapt_rows(
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(sql, params)
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        for r in rows:
+            for k in ("dish_name", "ingredients_list", "cooking_instructions"):
+                if isinstance(r.get(k), str):
+                    r[k] = normalize_unicode_spaces(r[k])
+        return rows
     finally:
         cursor.close()
 
@@ -1915,18 +2041,20 @@ def multi_variant_dups(ingredients: str) -> dict[str, int]:
 
 
 _VAGUE_UNIT_LINE_RE = re.compile(
-    r"^\s*(?:(?P<qty>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛])\s+)?"
+    r"^\s*(?P<opt>optional:\s*)?(?:(?P<qty>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛])"
+    r"(?:\s*(?:-|–|to)\s*(?P<qty2>\d+(?:\s+\d+/\d+|/\d+|\.\d+)?|[½¼¾⅓⅔⅛]))?\s+)?"
     r"(?:(?P<size>large|small|big)\s+)?"
-    r"(?P<unit>handfuls?|packs?|packets?|scoops?|bunch(?:es)?|bottles?|cans?|pinch(?:es)?|a\s+few)\b"
+    r"(?P<unit>handfuls?|packages?|packs?|pkgs?|packets?|scoops?|bunch(?:es)?|bottles?|cans?|jars?|sticks?|pinch(?:es)?|a\s+few)\b"
     r"(?:\s+of\b)?\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
 _PAREN_US_MEASURE_RE = re.compile(
-    r"\([^)\n]*?(?P<n>\d+(?:\.\d+)?)\s*(?P<u>oz|fl\.?\s*oz|lb|lbs|cups?|tbsp|tsp)\b[^)\n]*?\)",
+    r"\([^)\n]*?(?<!\d)(?<!\d/)(?<!\d\s)(?P<n>\d+\s+\d+/\d+|\d+/\d+|\d+(?:\.\d+)?)\s*"
+    r"(?P<u>fl\.?\s*oz|oz|lbs?|cups?|tbsps?|tsps?)\b(?P<after>[^)\n]*?)\)",
     re.IGNORECASE,
 )
 _PAREN_METRIC_ONLY_RE = re.compile(
-    r"\([^)\n]*?(?P<n>\d+(?:\.\d+)?)\s*(?P<u>g|grams?|ml)\b[^)\n]*?\)",
+    r"\((?:[^)\n]*?[\s/~≈])?(?P<n>\d+(?:\.\d+)?)\s*(?P<u>g|grams?|ml)\b(?P<after>[^)\n]*?)\)",
     re.IGNORECASE,
 )
 _VAGUE_RULES_CACHE: list[dict[str, Any]] | None = None
@@ -1953,7 +2081,7 @@ def _fmt_us_qty(val: float, unit: str) -> str:
     f = _Frac(val).limit_denominator(16)
     quarters = [0, _Frac(1, 4), _Frac(1, 2), _Frac(3, 4), 1]
     halves = [0, _Frac(1, 2), 1]
-    grid = quarters if val < 4 else (halves if val < 10 else [0, 1])
+    grid = quarters if val < 6 else (halves if val < 10 else [0, 1])
     whole = int(f)
     rem = f - whole
     best = min(grid, key=lambda g: abs(rem - g))
@@ -1962,11 +2090,17 @@ def _fmt_us_qty(val: float, unit: str) -> str:
         snapped = _Frac(1, 4) if unit in ("oz", "cup", "tsp", "tbsp") else _Frac(1)
     w, r = int(snapped), snapped - int(snapped)
     num_str = f"{w} {r}" if (w and r) else (str(w) if w else str(r))
-    u = unit.lower().replace(".", "").strip()
+    u = re.sub(r"\s+", " ", unit.lower().replace(".", "").strip())
     if u in ("cup", "cups"):
         u = "cup" if snapped <= 1 else "cups"
     elif u in ("sprig", "sprigs"):
         u = "sprig" if snapped <= 1 else "sprigs"
+    elif u in ("lb", "lbs"):
+        u = "lb"
+    elif u in ("tbsp", "tbsps"):
+        u = "tbsp"
+    elif u in ("tsp", "tsps"):
+        u = "tsp"
     return f"{num_str} {u}"
 
 
@@ -1974,7 +2108,7 @@ def _norm_vague_unit_key(raw_unit: str) -> str:
     u = re.sub(r"\s+", " ", raw_unit.lower().strip())
     if u.startswith("handful"):
         return "handful"
-    if u.startswith("pack"):
+    if u.startswith(("pack", "pkg")):
         return "pack"
     if u.startswith("scoop"):
         return "scoop"
@@ -1984,6 +2118,10 @@ def _norm_vague_unit_key(raw_unit: str) -> str:
         return "bottle"
     if u.startswith("can"):
         return "can"
+    if u.startswith("jar"):
+        return "jar"
+    if u.startswith("stick"):
+        return "stick"
     if u.startswith("pinch"):
         return "pinch"
     return u
@@ -1994,56 +2132,74 @@ def normalize_vague_units(
     row_id: int | None = None,
     base_dir: Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Заменяет расплывчатые единицы (handful, pack, scoop, bunch, bottle, unsized can, a few, >1 pinch) на US-меры."""
+    """Заменяет расплывчатые единицы (handful, pack/package, scoop, bunch, bottle, can, jar, stick со скобкой, a few, >1 pinch) на US-меры."""
     rules = load_vague_units_rules(base_dir)
     out_lines: list[str] = []
     warns: list[str] = []
     uni = globals().get("_UNI_FRAC", {"½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", "⅛": "1/8"})
 
     for raw_line in (ingredients or "").splitlines():
-        line = raw_line.strip()
+        line = re.sub(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]", " ", raw_line).strip()
         if not line:
             out_lines.append(raw_line)
             continue
-        norm_line = line
-        for k, v in uni.items():
-            norm_line = norm_line.replace(k, f" {v}").strip()
+        norm_line = re.sub(r"(\d)([½¼¾⅓⅔⅛])", lambda mm: f"{mm.group(1)} {uni[mm.group(2)]}", line)
+        norm_line = re.sub(r"[½¼¾⅓⅔⅛]", lambda mm: uni[mm.group(0)], norm_line)
         m = _VAGUE_UNIT_LINE_RE.match(norm_line)
         if not m:
             out_lines.append(raw_line)
             continue
 
+        opt_prefix = m.group("opt") or ""
         unit_key = _norm_vague_unit_key(m.group("unit"))
         qty_str = m.group("qty")
-        qty = _to_float(qty_str) if qty_str else 1.0
+        try:
+            qty = _to_float(qty_str) if qty_str else 1.0
+        except (ValueError, ZeroDivisionError):
+            out_lines.append(raw_line)
+            continue
         rest = m.group("rest").strip()
 
         # 1 pinch (или просто "pinch of salt") не трогаем — только pinch > 1
         if unit_key == "pinch" and qty <= 1.0 + 1e-6:
             out_lines.append(raw_line)
             continue
-        # can с уже указанным размером (например "1 (14 oz) can" или "1 can (14 oz)") не считаем расплывчатым
-        if unit_key == "can" and re.search(r"\b\d+(?:\.\d+)?\s*-?\s*(?:oz|ounces?|g|grams?|ml)\b", norm_line, re.I):
-            out_lines.append(raw_line)
-            continue
 
-        # Приоритет 1: точная US-мера в скобках (например "(100 g/ 3.5 oz)")
+        # Приоритет 1: точная US-мера в скобках (например "(100 g/ 3.5 oz)", "(3 1/2 oz)", "(1/2 oz)")
         pm = _PAREN_US_MEASURE_RE.search(rest)
         if pm:
-            us_val = float(pm.group("n"))
-            us_unit = pm.group("u")
-            cleaned_rest = re.sub(r"\s{2,}", " ", (rest[:pm.start()] + rest[pm.end():])).strip(" ,;-")
-            out_lines.append(f"{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
-            continue
+            try:
+                us_val = _to_float(pm.group("n"))
+            except (ValueError, ZeroDivisionError):
+                us_val = 0.0
+            if us_val > 0:
+                if re.search(r"\b(?:each|per\s+(?:pack|package|can|jar|stick|bottle))\b", pm.group("after") or "", re.I):
+                    us_val *= qty
+                us_unit = pm.group("u")
+                cleaned_rest = re.sub(r"\s{2,}", " ", (rest[:pm.start()] + rest[pm.end():])).strip(" ,;-")
+                out_lines.append(f"{opt_prefix}{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
+                continue
 
-        # Приоритет 1b: метрика в скобках -> перевод в US oz/tbsp
+        # Приоритет 1b: метрика в скобках -> перевод в US oz/fl oz
         pm_m = _PAREN_METRIC_ONLY_RE.search(rest)
         if pm_m:
             m_val = float(pm_m.group("n"))
             m_unit = pm_m.group("u").lower()
             us_val, us_unit = (m_val / 28.35, "oz") if m_unit.startswith("g") else (m_val / 29.57, "fl oz")
+            if re.search(r"\b(?:each|per\s+(?:pack|package|can|jar|stick|bottle))\b", pm_m.group("after") or "", re.I):
+                us_val *= qty
             cleaned_rest = re.sub(r"\s{2,}", " ", (rest[:pm_m.start()] + rest[pm_m.end():])).strip(" ,;-")
-            out_lines.append(f"{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
+            out_lines.append(f"{opt_prefix}{_fmt_us_qty(us_val, us_unit)} {cleaned_rest}".strip())
+            continue
+
+        # stick без скобки — стандартная US-мера масла, оставляем как есть без WARNING
+        if unit_key == "stick":
+            out_lines.append(raw_line)
+            continue
+
+        # can с уже указанным размером вне скобок (например "1 14-oz can") не считаем расплывчатым
+        if unit_key == "can" and re.search(r"\b\d+(?:\.\d+)?\s*-?\s*(?:oz|ounces?|g|grams?|ml)\b", norm_line, re.I):
+            out_lines.append(raw_line)
             continue
 
         # Приоритет 2: справочник locales/vague_units.yaml
@@ -2056,7 +2212,7 @@ def normalize_vague_units(
         if matched_rule:
             size_mult = 1.5 if (m.group("size") or "").lower() in ("large", "big") else 1.0
             total_amt = qty * size_mult * float(matched_rule["amount"])
-            out_lines.append(f"{_fmt_us_qty(total_amt, str(matched_rule['target_unit']))} {rest}".strip())
+            out_lines.append(f"{opt_prefix}{_fmt_us_qty(total_amt, str(matched_rule['target_unit']))} {rest}".strip())
             continue
 
         # Приоритет 3: нет соответствия -> оставить как есть и WARNING
@@ -2979,8 +3135,7 @@ def main() -> int:
                     csv_buffer.append((rows_by_id[rid], rewritten, saved_id, save_status))
 
                 if not DRY_RUN:
-                    connection.commit()
-                    total_saved_ids += append_ids_file(ids_out_file, batch_saved_ids)
+                    total_saved_ids += commit_batch_with_ids(connection, ids_out_file, batch_saved_ids)
 
                 try:
                     append_csv_batch(CSV_LOG_FILE, csv_buffer)

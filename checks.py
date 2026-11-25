@@ -27,23 +27,45 @@ _UNIT_ALIAS = {"tsps": "tsp", "teaspoon": "tsp", "teaspoons": "tsp", "tbsps": "t
                "sticks": "stick", "pints": "pint", "pt": "pint", "quarts": "quart", "qt": "quart"}
 
 
-def _fr(s: str) -> Fraction:
-    s = s.strip()
-    if " " in s:
-        w, f = s.split(None, 1)
-        return Fraction(w) + Fraction(f)
-    return Fraction(s)
+_UNICODE_SPACES_RE = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+
+
+def _norm_spaces(text: str | None) -> str:
+    if not text:
+        return text or ""
+    return _UNICODE_SPACES_RE.sub(" ", text)
+
+
+def _fr(s: str) -> Fraction | None:
+    s = _norm_spaces(s).strip()
+    try:
+        if " " in s:
+            w, f = s.split(None, 1)
+            return Fraction(w) + Fraction(f)
+        return Fraction(s)
+    except (ZeroDivisionError, ValueError):
+        return None
 
 
 def _lead_qty(line: str) -> str | None:
     """'1 1/2 cups x' и '1.5 cup x' дают одинаковый ключ; 32 oz == 2 lb."""
-    m = _LEAD.match(line)
+    m = _LEAD.match(_norm_spaces(line))
     if not m:
         return None
-    u = (m.group("u") or "").lower().replace(" ", "")
+    u = re.sub(r"\s+", "", (m.group("u") or "").lower())
     u = _UNIT_ALIAS.get(u, u)
-    kind, k = _BASE[u]
-    vals = [str(_fr(re.sub(r"\s+", " ", x)) * k) for x in (m.group("n"), m.group("n2")) if x]
+    base = _BASE.get(u)
+    if base is None:
+        return None
+    kind, k = base
+    vals: list[str] = []
+    for x in (m.group("n"), m.group("n2")):
+        if not x:
+            continue
+        fv = _fr(re.sub(r"\s+", " ", x))
+        if fv is None:
+            return None
+        vals.append(str(fv * k))
     return f"{kind}:" + "-".join(vals)
 
 
@@ -51,7 +73,8 @@ _UF = {"½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", "⅛":
 
 
 def _nf(text: str) -> str:
-    text = re.sub(r"(\d)([½¼¾⅓⅔⅛])", lambda m: f"{m.group(1)} {_UF[m.group(2)]}", text or "")
+    text = _norm_spaces(text)
+    text = re.sub(r"(\d)([½¼¾⅓⅔⅛])", lambda m: f"{m.group(1)} {_UF[m.group(2)]}", text)
     return re.sub(r"[½¼¾⅓⅔⅛]", lambda m: _UF[m.group(0)], text)
 
 

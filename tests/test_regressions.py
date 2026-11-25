@@ -127,6 +127,57 @@ check("безопасная температура курицы", C.fix_safety_t
 check("ссылка на рецепт в списке", C.strip_recipe_refs("1/2 recipe fresh salsa"), "prepared fresh salsa, for serving")
 check("style_check poultry", C.style_check("1 lb chicken", "Cook the poultry.", ""), lambda x: len(x) == 1)
 check("run_hash unchanged (r04.3)", ns["generate_run_hash"]("TEST_PROMPT", "gemini-3.8-flash", "4/8/2.5"), lambda h: h == "c31fc268")
+# --- r16.4: эталонные хэши при дефолтных настройках .env и смена при изменении политики масштабирования
+_h_ref = [
+    ns["generate_run_hash"]("PROMPT_A", "gemini-3.8-flash", 4),
+    ns["generate_run_hash"]("PROMPT_B", "gemini-3.8-flash", 6),
+    ns["generate_run_hash"]("PROMPT_C", "gemini-3.8-flash", 8),
+]
+check("r16.4: run_hash default matches baseline for 3 configs", _h_ref, lambda hs: hs == ["a916a1d9", "ccb87706", "63061b23"])
+_saved_pol = (
+    ns.get("RESCALE_SKIP_BAKEWARE", True),
+    ns.get("RESCALE_SKIP_PAREN_QTY", True),
+    ns.get("RESCALE_MAX_DIVISOR", 2.5),
+    ns.get("RESCALE_ONLY_IF_MORE_THAN", 8),
+)
+try:
+    ns["RESCALE_SKIP_BAKEWARE"] = False
+    check("r16.4: changing RESCALE_SKIP_BAKEWARE changes run_hash",
+          ns["generate_run_hash"]("PROMPT_A", "gemini-3.8-flash", 4), lambda h: h != _h_ref[0])
+    ns["RESCALE_SKIP_BAKEWARE"] = True
+    ns["RESCALE_SKIP_PAREN_QTY"] = False
+    check("r16.4: changing RESCALE_SKIP_PAREN_QTY changes run_hash",
+          ns["generate_run_hash"]("PROMPT_A", "gemini-3.8-flash", 4), lambda h: h != _h_ref[0])
+    ns["RESCALE_SKIP_PAREN_QTY"] = True
+    ns["RESCALE_MAX_DIVISOR"] = 3.0
+    check("r16.4: changing RESCALE_MAX_DIVISOR changes run_hash",
+          ns["generate_run_hash"]("PROMPT_A", "gemini-3.8-flash", 4), lambda h: h != _h_ref[0])
+    ns["RESCALE_MAX_DIVISOR"] = 2.5
+    ns["RESCALE_ONLY_IF_MORE_THAN"] = 10
+    check("r16.4: changing RESCALE_ONLY_IF_MORE_THAN changes run_hash",
+          ns["generate_run_hash"]("PROMPT_A", "gemini-3.8-flash", 4), lambda h: h != _h_ref[0])
+finally:
+    (ns["RESCALE_SKIP_BAKEWARE"], ns["RESCALE_SKIP_PAREN_QTY"],
+     ns["RESCALE_MAX_DIVISOR"], ns["RESCALE_ONLY_IF_MORE_THAN"]) = _saved_pol
+
+# --- r16.2: NBSP и узкие пробелы + защита от ZeroDivisionError и KeyError на fl oz
+check("r16.2: NBSP 1\\u00a01/2 cups scales identically",
+      sc("1\u00a01/2 cups almond flour", "", 0.5)[0], lambda x: x == sc("1 1/2 cups almond flour", "", 0.5)[0])
+check("r16.2: narrow space 1\\u202f1/2 cups scales identically",
+      sc("1\u202f1/2 cups almond flour", "", 0.5)[0], lambda x: x == sc("1 1/2 cups almond flour", "", 0.5)[0])
+check("r16.2: 1/0 cup does not crash scale_recipe",
+      sc("1/0 cup water", "", 0.5)[0], "1/0 cup water")
+check("r16.2: 1/0 cup does not crash fidelity_check",
+      C.fidelity_check("1/0 cup water", "1/0 cup water"), lambda x: x == [])
+check("r16.2: 2 fl\\u00a0oz with NBSP does not raise KeyError in fidelity_check",
+      C.fidelity_check("2 fl\u00a0oz heavy cream", "2 fl oz heavy cream"), lambda x: x == [])
+
+# --- r16.7: конфликт ведущей метрики и US-меры >15% (4944)
+_m4944 = mb("500 g ground pork, I used 20% fat (1.1 oz)")
+check("r16.7 (4944): metric conflict 500 g vs 1.1 oz -> 1.1 lb",
+      _m4944, lambda x: x.startswith("1.1 lb ground pork"))
+check("r16.7 (4944): fidelity_check accepts 1.1 lb",
+      C.fidelity_check(_m4944, _m4944), lambda x: x == [])
 # --- r06.12: prep_check 'seed' в перечислении (1053)
 check("prep_check seed с запятой (1053)", C.prep_check("1/4 cup roasted red pepper, peeled, seeded, and chopped", "Peel, seed, and chop 1/4 cup roasted red pepper."), lambda x: x == [])
 check("prep_check seed отсутствует", C.prep_check("1/4 cup roasted red pepper, peeled, seeded, and chopped", "Peel and chop 1/4 cup roasted red pepper."), lambda x: "seed" in x)

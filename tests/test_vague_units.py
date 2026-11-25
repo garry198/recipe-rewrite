@@ -142,5 +142,45 @@ ns["RESCALE_SKIP_BAKEWARE"] = True
 check("no bakeware scales 16 -> 8",
       choose(16, "2 cups almond flour\n1/2 cup butter", instructions="Stir in a large bowl and chill.") == 8)
 
+# === r16.1: точные дроби и юникод-дроби в скобках ===
+out_mix, _ = norm_vague("1 pack feta (3 1/2 oz)")
+check("r16.1: 1 pack feta (3 1/2 oz) -> 3 1/2 oz feta", out_mix == "3 1/2 oz feta", out_mix)
+
+out_uni, _ = norm_vague("1 pack herbs (½ oz)")
+check("r16.1: (½ oz) -> 1/2 oz", out_uni == "1/2 oz herbs", out_uni)
+
+out_umix, _ = norm_vague("1 pack spinach (1 ½ cups)")
+check("r16.1: (1 ½ cups) -> 1 1/2 cups", out_umix == "1 1/2 cups spinach", out_umix)
+
+out_fr, _ = norm_vague("1 pack spice (1/2 oz)")
+check("r16.1: (1/2 oz) -> 1/2 oz", out_fr == "1/2 oz spice", out_fr)
+
+out_dec, _ = norm_vague("1 pack feta (3.5 oz)")
+check("r16.1: (3.5 oz) -> 3 1/2 oz", out_dec == "3 1/2 oz feta", out_dec)
+
+out_slash, _ = norm_vague("1 pack feta (100 g/ 3.5 oz)")
+check("r16.1: (100 g/ 3.5 oz) -> 3 1/2 oz", out_slash == "3 1/2 oz feta", out_slash)
+
+# === r16.6: меры упаковок/банок из скобок (9686, 9709, 9720, 9699, 9450) ===
+out_9709, _ = norm_vague("2-3 packages goat's cheese rounds (150 g/ 5.3 oz)", row_id=9709)
+check("r16.6 (9709): 2-3 packages goat's cheese rounds (5.3 oz) -> 5 1/4 oz",
+      out_9709 == "5 1/4 oz goat's cheese rounds", out_9709)
+
+out_9720, _ = norm_vague("1/2 package smoked salmon (50 g/ 1.8 oz)", row_id=9720)
+check("r16.6 (9720): 1/2 package smoked salmon (1.8 oz) -> 1 3/4 oz",
+      out_9720 == "1 3/4 oz smoked salmon", out_9720)
+
+out_9686, _ = norm_vague("1 package unsalted butter (250 g/ 8.8 oz)", row_id=9686)
+check("r16.6 (9686): 1 package unsalted butter (8.8 oz) -> 9 oz unsalted butter",
+      out_9686 == "9 oz unsalted butter", out_9686)
+
+out_9699, _ = norm_vague("Optional: 1 package feta cheese (100 g/ 3.5 oz)", row_id=9699)
+check("r16.6 (9699): Optional: 1 package feta cheese (3.5 oz) -> Optional: 3 1/2 oz feta cheese",
+      out_9699 == "Optional: 3 1/2 oz feta cheese", out_9699)
+
+out_9450, _ = norm_vague("1 can unsweetened pumpkin puree (400 g/ 14 oz)", row_id=9450)
+check("r16.6 (9450): 1 can pumpkin puree (14 oz) -> 14 oz unsweetened pumpkin puree",
+      out_9450 == "14 oz unsweetened pumpkin puree", out_9450)
+
 print(f"\nИТОГО vague_units: {'все тесты пройдены' if not fails else f'упало {len(fails)}: {fails}'}")
 sys.exit(1 if fails else 0)
