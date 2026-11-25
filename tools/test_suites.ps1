@@ -9,5 +9,6 @@
     "tests\test_force_backup.py",
     "tests\test_api_usage_log.py",
     "tests\test_api_reliability.py",
-    "tests\test_force_defects.py"
+    "tests\test_force_defects.py",
+    "tests\test_vague_units.py"
 )
