@@ -1,0 +1,211 @@
+# Словарь замен брендов на нейтральные названия (r17).
+# Порядок правил важен: более специфичные шаблоны идут первыми.
+# Все шаблоны применяются с флагом re.IGNORECASE.
+
+brands:
+  - name: Besti
+    detect: '\bBesti\b'
+  - name: Wholesome Yum
+    detect: '\bWholesome\s+Yum\b'
+  - name: Sukrin
+    detect: '\bSukrin\b'
+  - name: Swerve
+    detect: '\bSwerve\b'
+  - name: Lakanto
+    detect: '\bLakanto\b'
+  - name: Vegemite
+    detect: '\bVegemite\b'
+  - name: Truvia
+    detect: '\bTruvia\b'
+  - name: Monin
+    detect: '\bMonin\b'
+
+# Аффилиатные ссылки, удаляемые только из строк, в которых найдены бренды.
+strip_links_pattern: '\s*\[https?://amzn\.to/[^\]]+\]'
+
+# Фрагменты названий брендов, содержащие цифры (чтобы защита чисел не давала ложный WARNING).
+brand_number_tokens:
+  - '\bSukrin:1\b'
+
+rules:
+  # --- Составные упоминания нескольких брендов ---
+  - id: sukrin_swerve_such_as
+    brand: Sukrin
+    pattern: '\bsuch\s+as\s+(?:Sukrin\s+Gold\s+or\s+Swerve|Swerve\s+or\s+Sukrin\s+Gold)\b'
+    replacement: ''
+
+  # --- Besti ---
+  - id: besti_powdered_blend
+    brand: Besti
+    pattern: '\bBesti\s+Powdered\s+monk\s+fruit\s+allulose\s+blend\b'
+    replacement: 'powdered monk fruit allulose blend'
+  - id: besti_brown_blend
+    brand: Besti
+    pattern: '\bBesti\s+Brown\s+monk\s+fruit\s+allulose\s+blend\b'
+    replacement: 'brown monk fruit allulose blend'
+  - id: besti_blend
+    brand: Besti
+    pattern: '\bBesti\s+monk\s+fruit\s+allulose\s+blend\b'
+    replacement: 'monk fruit allulose blend'
+  - id: besti_brown_sweetener
+    brand: Besti
+    pattern: '\bBesti\s+brown\s+sweetener\b'
+    replacement: 'brown monk fruit allulose blend'
+  - id: besti_powdered_short
+    brand: Besti
+    pattern: '\bpowdered\s+Besti(?:\s+sweetener)?\b'
+    replacement: 'powdered monk fruit allulose blend'
+  - id: besti_standalone
+    brand: Besti
+    pattern: '\bBesti\b'
+    replacement: 'monk fruit allulose blend'
+
+  # --- Wholesome Yum ---
+  - id: wholesome_yum_almond_flour
+    brand: Wholesome Yum
+    pattern: '\bWholesome\s+Yum\s+blanched\s+almond\s+flour\b'
+    replacement: 'blanched almond flour'
+  - id: wholesome_yum_coconut_flour
+    brand: Wholesome Yum
+    pattern: '\bWholesome\s+Yum\s+Coconut\s+Flour\b'
+    replacement: 'coconut flour'
+  - id: wholesome_yum_maple_syrup
+    brand: Wholesome Yum
+    pattern: '\bWholesome\s+Yum\s+Zero\s+Sugar\s+Maple\s+Syrup\b'
+    replacement: 'sugar-free maple syrup'
+  - id: wholesome_yum_honey
+    brand: Wholesome Yum
+    pattern: '\bWholesome\s+Yum\s+Zero\s+Sugar\s+Honey\s+Substitute\b'
+    replacement: 'sugar-free honey substitute'
+  - id: wholesome_yum_prefix
+    brand: Wholesome Yum
+    pattern: '\bWholesome\s+Yum\s+'
+    replacement: ''
+
+  # --- Sukrin ---
+  - id: sukrin_gold_fiber_syrup
+    brand: Sukrin
+    pattern: '\bSukrin\s+Gold\s+Fiber\s+Syrup\b'
+    replacement: 'fiber syrup'
+  - id: sukrin_gold_brown_sugar_sub
+    brand: Sukrin
+    pattern: '\bSukrin\s+Gold\s+brown\s+sugar\s+substitute\b'
+    replacement: 'brown sugar substitute'
+  - id: sukrin_gold_sweetener
+    brand: Sukrin
+    pattern: '\bSukrin\s+Gold\s+sweetener\b'
+    replacement: 'brown sugar substitute'
+  - id: sukrin_gold
+    brand: Sukrin
+    pattern: '\bSukrin\s+Gold\b'
+    replacement: 'brown sugar substitute'
+  - id: sukrin_melis_paren_or
+    brand: Sukrin
+    pattern: '\(\s*or\s+Sukrin\s+Melis\s*\)'
+    replacement: ''
+  - id: sukrin_melis
+    brand: Sukrin
+    pattern: '\bSukrin\s+Melis\b'
+    replacement: 'powdered erythritol'
+  - id: sukrin_1_paren_or
+    brand: Sukrin
+    pattern: '\(\s*or\s+Sukrin:1\s*\)'
+    replacement: ''
+  - id: sukrin_1
+    brand: Sukrin
+    pattern: '\bSukrin:1\b'
+    replacement: 'low carb sugar substitute'
+  - id: sukrin_standalone
+    brand: Sukrin
+    pattern: '\bSukrin\b'
+    replacement: 'low carb sugar substitute'
+
+  # --- Swerve ---
+  - id: swerve_erythritol_or
+    brand: Swerve
+    pattern: '\berythritol\s+or\s+Swerve\b'
+    replacement: 'erythritol'
+  - id: swerve_or_erythritol
+    brand: Swerve
+    pattern: '\bSwerve\s+or\s+erythritol\b'
+    replacement: 'erythritol'
+  - id: swerve_paren_or
+    brand: Swerve
+    pattern: '\(\s*or\s+Swerve\s*\)'
+    replacement: ''
+  - id: swerve_comma_or_allulose
+    brand: Swerve
+    pattern: ',\s*Swerve\s+or\s+Allulose\b'
+    replacement: ' or Allulose'
+  - id: swerve_or_tail
+    brand: Swerve
+    pattern: '\bor\s+Swerve\b'
+    replacement: ''
+  - id: swerve_confectioners
+    brand: Swerve
+    pattern: '\bSwerve\s+confectioners(?:\s+powdered\s+sweetener)?\b'
+    replacement: 'powdered erythritol sweetener'
+  - id: confectioners_swerve
+    brand: Swerve
+    pattern: '\bconfectioners\s+Swerve\b'
+    replacement: 'powdered erythritol sweetener'
+  - id: swerve_brown_sugar_sub
+    brand: Swerve
+    pattern: '\bSwerve\s+brown\s+sugar\s+substitute\b'
+    replacement: 'brown sugar substitute'
+  - id: powdered_swerve
+    brand: Swerve
+    pattern: '\bpowdered\s+Swerve\b'
+    replacement: 'powdered erythritol sweetener'
+  - id: swerve_standalone
+    brand: Swerve
+    pattern: '\bSwerve\b'
+    replacement: 'erythritol sweetener'
+
+  # --- Lakanto ---
+  - id: lakanto_chocolate_bar
+    brand: Lakanto
+    pattern: '\bLakanto\s+chocolate\s+bar\b'
+    replacement: 'sugar-free dark chocolate bar'
+  - id: lakanto_monk_fruit
+    brand: Lakanto
+    pattern: '\bLakanto\s+(?=(?:liquid|powdered|golden|classic)?\s*monk\s+fruit\b)'
+    replacement: ''
+
+  # --- Truvia ---
+  - id: truvia_standalone
+    brand: Truvia
+    pattern: '\bTruvia\b'
+    replacement: 'stevia-erythritol sweetener'
+
+  # --- Monin ---
+  - id: monin_standalone
+    brand: Monin
+    pattern: '\bMonin\b'
+    replacement: 'sugar-free syrup'
+
+  # --- Vegemite ---
+  - id: vegemite_marmite_paren
+    brand: Vegemite
+    pattern: '\s*\(\s*such\s+as\s+Marmite\s+or\s+Vegemite\s*\)'
+    replacement: ''
+  - id: vegemite_paren
+    brand: Vegemite
+    pattern: '\s*\(\s*such\s+as\s+Vegemite\s*\)'
+    replacement: ''
+
+normalize:
+  - pattern: '\berythritol\s+or\s+erythritol\b'
+    replacement: 'erythritol'
+  - pattern: '\bor\s+or\b'
+    replacement: 'or'
+  - pattern: '\(\s*or\s*\)'
+    replacement: ''
+  - pattern: '\(\s*\)'
+    replacement: ''
+  - pattern: '\s+,'
+    replacement: ','
+  - pattern: '\s+\.'
+    replacement: '.'
+  - pattern: '[ \t]{2,}'
+    replacement: ' '

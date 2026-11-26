@@ -11,5 +11,6 @@
     "tests\test_api_reliability.py",
     "tests\test_force_defects.py",
     "tests\test_vague_units.py",
-    "tests\test_run_wave.py"
+    "tests\test_run_wave.py",
+    "tests\test_brand_cleanup.py"
 )
