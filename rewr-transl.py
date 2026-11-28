@@ -53,6 +53,8 @@ except ImportError as _e:
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=False)
 
+from tools.name_normalize import normalize_dish_name  # noqa: E402
+
 # ================= НАСТРОЙКА ЛОГОВ =================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 CONSOLE_LOG_LEVEL = os.getenv("CONSOLE_LOG_LEVEL", LOG_LEVEL).upper()
@@ -1731,12 +1733,15 @@ def save_adapted_recipe(
 ) -> tuple[int | None, str]:
     instructions_hash = hashlib.sha256(data.cooking_instructions.encode("utf-8")).hexdigest()
     sql = build_adapt_insert_sql(force=force, keep_dish_name=keep_dish_name)
+    _norm_dn = globals().get("normalize_dish_name")
+    raw_dish_name = source_row.get("dish_name") or ""
+    dish_name_out = _norm_dn(raw_dish_name) if _norm_dn else raw_dish_name
     params = (
         int(source_row["recipe_id"]),
         market,
         locale,
         status,
-        source_row.get("dish_name") or "",
+        dish_name_out,
         data.ingredients_list,
         data.cooking_instructions,
         instructions_hash,
@@ -1813,8 +1818,10 @@ def save_rewritten_recipe(connection: mariadb.Connection, source_row_id: int, da
             return source_row_id
 
         elif APP_MODE == "translate":
+            _norm_dn = globals().get("normalize_dish_name")
+            dish_name_out = _norm_dn(data.dish_name) if _norm_dn else data.dish_name
             cursor.execute(build_translate_insert_sql(), (
-                TARGET_MARKET, TARGET_LOCALE, data.dish_name, data.ingredients_list, data.cooking_instructions,
+                TARGET_MARKET, TARGET_LOCALE, dish_name_out, data.ingredients_list, data.cooking_instructions,
                 instructions_hash, TARGET_CURRENCY,
                 ai_model, source_row_id,
             ))
