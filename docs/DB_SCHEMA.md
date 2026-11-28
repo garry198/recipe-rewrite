@@ -184,7 +184,7 @@ CREATE TABLE `price_history` (
 | `created_at` | БД `DEFAULT current_timestamp()` / `translate` `NOW()` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
 | `updated_at` | `rewr-transl.py` (`NOW()`) / БД `ON UPDATE` | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
 | `ai_model` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_recipe_rewrite_for_backup`) |
-| `dish_name_variant` | `rewr-transl.py` (`adapt`: из `recipes3.dish_name`; при `FORCE` и `FORCE_KEEP_DISH_NAME=1` не перезаписывается; `translate`: перевод) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
+| `dish_name_variant` | `rewr-transl.py` (`adapt`: из `recipes3.dish_name` с `normalize_dish_name()`; при `FORCE` и `FORCE_KEEP_DISH_NAME=1` не перезаписывается; `translate`: перевод с `normalize_dish_name()`) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
 | `ingredients_list_variant` | `rewr-transl.py` (`adapt`/`FORCE`, `rewrite`, `translate`) | `rewr-transl.py` (`fetch_rewrite_rows`, `fetch_recipe_rewrite_for_backup`) |
 | `calories_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
 | `proteins_per_person` | `adapt`: не пишется (`NULL`); `FORCE`: сбрасывается в `NULL`; `translate`: копируется; владелец расчёта — `cost-nutrients` | `rewr-transl.py` (`translate`, `fetch_recipe_rewrite_for_backup`) |
